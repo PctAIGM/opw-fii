@@ -1,0 +1,6 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+import sys
+sys.path.insert(0, "/usr/lib")
+from fii.cli import main
+main()

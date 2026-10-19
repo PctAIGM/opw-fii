@@ -1,0 +1,8 @@
+{
+  "admin/services/fii": {
+    "title": "FII",
+    "order": 60,
+    "action": { "type": "view", "path": "fii/app" },
+    "depends": { "acl": ["luci-app-fii"] }
+  }
+}

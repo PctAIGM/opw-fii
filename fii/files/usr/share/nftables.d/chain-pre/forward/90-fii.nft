@@ -1,0 +1,3 @@
+# FII owns this mark and TUN device. Rules are inert without the FII service.
+meta mark & 0x0000ffff == 0x0000f102 counter accept comment "fii tun outbound"
+iifname "fii-tun" counter accept comment "fii tun inbound"

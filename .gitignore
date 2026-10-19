@@ -1,0 +1,12 @@
+.references/
+build/
+dist/
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.local/
+*.log
+.env
+.env.*
+!.env.example

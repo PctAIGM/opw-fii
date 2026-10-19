@@ -1,0 +1,19 @@
+# 可直接粘贴到 YAML 覆写。无需额外 Geo 数据文件。
+proxy-groups!:
+  - name: PROXY
+    type: select
+    proxies: [自动选择, 全部节点, DIRECT]
+  - name: 全部节点
+    type: select
+    proxies: '{{proxy_names}}'
+  - name: 自动选择
+    type: url-test
+    proxies: '{{proxy_names}}'
+    url: https://cp.cloudflare.com/generate_204
+    interval: 300
+    tolerance: 80
+rules!:
+  - DOMAIN-SUFFIX,lan,DIRECT
+  - DOMAIN-SUFFIX,local,DIRECT
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - MATCH,PROXY

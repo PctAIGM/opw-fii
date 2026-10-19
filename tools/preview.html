@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>FII · Local Preview</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,'Microsoft YaHei',sans-serif;background:#f5f7f6;color:#172b27}body>header{background:#fff;border-bottom:1px solid #dce5e0;padding:18px 28px;display:flex;justify-content:space-between;gap:16px}main{max-width:1260px;margin:auto;padding:22px 24px}button,input,select,textarea{font-family:inherit}.cbi-button{border:1px solid #d1dcd6;background:#fff;color:#244b3c;border-radius:6px;min-height:40px;padding:8px 14px;cursor:pointer}.cbi-button-action{background:#146b4a;color:white;border-color:#146b4a}.cbi-button-negative{color:#ad2431}.modal-overlay{position:fixed;inset:0;background:#0006;display:flex;align-items:center;justify-content:center;padding:20px;z-index:20}.modal{background:#fff;border-radius:12px;padding:26px;max-width:860px;width:100%;max-height:90vh;overflow:auto}.modal h4:first-child{font-size:22px;margin:0 0 20px}.toast{position:fixed;right:24px;bottom:24px;background:#173e2e;color:white;padding:15px 20px;border-radius:9px;max-width:600px;z-index:40}.toast.error{background:#8d2230}small.preview{color:#526660;font-size:12px}.modal input:not([type=checkbox]),.modal textarea,.modal select{width:100%;max-width:100%}.modal p{overflow-wrap:anywhere}@media(max-width:700px){main{padding:12px}body>header{padding:12px 18px;flex-direction:column;gap:3px}.modal-overlay{padding:10px}.modal{padding:18px}}@media(prefers-color-scheme:dark){body{background:#111c17;color:#edf5f0}body>header,.modal{background:#172320;color:#edf5f0}.cbi-button{background:#203e30;color:#edf5f0;border-color:#476755}small.preview{color:#b1c5ba}}
+</style></head><body><header><strong>LuCI / 服务 / FII</strong><small class="preview">本地开发预览 · 路由器操作已禁用</small></header><main id="app">正在载入…</main>
+<script>
+function E(tag, attrs, children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value === undefined || value === null || value === false) continue;
+    if (typeof value === 'function') node.addEventListener(key, value);
+    else if (['checked','selected','disabled','readOnly','required'].includes(key)) node[key] = value;
+    else node.setAttribute(key, String(value));
+  }
+  function add(child) {
+    if (Array.isArray(child)) child.forEach(add);
+    else if (child != null) node.appendChild(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  add(children); return node;
+}
+const L = {resource: path => '/luci-app-fii/htdocs/luci-static/resources/' + path};
+const view = {extend: spec => spec};
+const rpc = {declare: spec => async payload => {
+  const response = await fetch('/api', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method:spec.method,payload:JSON.parse(payload)})});
+  return response.json();
+}};
+const ui = {
+  showModal(title, children, klass) {
+    this.hideModal();
+    const heading = E('h4', {id:'modal-title'}, title);
+    const overlay = E('div', {class:'modal-overlay'}, E('div', {class:'modal ' + (klass || ''),role:'dialog','aria-modal':'true','aria-labelledby':'modal-title'}, [heading,children]));
+    document.body.appendChild(overlay);
+  },
+  hideModal() { document.querySelector('.modal-overlay')?.remove(); },
+  addNotification(_, content, tone) {
+    const notification = E('div',{class:'toast ' + (tone === 'error' ? 'error' : ''),role:'status'},content);
+    document.body.appendChild(notification); setTimeout(()=>notification.remove(),5000);
+  }
+};
+const poll = {add: (fn, seconds) => window.setInterval(fn, seconds*1000)};
+window.addEventListener('keydown',e=>{if(e.key==='Escape')ui.hideModal()});
+(async()=>{
+  try {
+    const source = await (await fetch('/luci-app-fii/htdocs/luci-static/resources/view/fii/app.js')).text();
+    const app = new Function('view','rpc','ui','poll','E','L',source)(view,rpc,ui,poll,E,L);
+    document.querySelector('#app').replaceChildren(app.render(await app.load()));
+    window.fiiApp = app;
+  } catch(error) { document.querySelector('#app').textContent = error.stack; }
+})();
+</script></body></html>

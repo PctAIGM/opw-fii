@@ -1,0 +1,6 @@
+#!/bin/sh
+# firewall4 include runs after each reload. Rebuild only while the core wrapper is active.
+if [ -f /tmp/fii/ready ]; then
+    /usr/bin/fii firewall-up 2>&1 | logger -t fii-firewall
+fi
+exit 0

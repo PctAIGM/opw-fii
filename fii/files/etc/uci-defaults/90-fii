@@ -1,0 +1,20 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+umask 077
+mkdir -p /etc/fii /etc/fii/core /etc/crontabs
+chmod 700 /etc/fii /etc/fii/core
+uci -q batch <<'EOF'
+set firewall.fii=include
+set firewall.fii.type='script'
+set firewall.fii.path='/usr/libexec/fii/firewall-include'
+set firewall.fii.fw4_compatible='1'
+commit firewall
+EOF
+touch /etc/crontabs/root
+sed -i '/# fii-refresh$/d' /etc/crontabs/root
+echo '* * * * * /usr/bin/fii scheduled 2>&1 | logger -t fii-refresh # fii-refresh' >> /etc/crontabs/root
+/etc/init.d/cron reload
+/usr/bin/fii sync-boot
+/etc/init.d/firewall reload
+/etc/init.d/rpcd restart
+exit 0

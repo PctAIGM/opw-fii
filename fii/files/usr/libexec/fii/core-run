@@ -1,0 +1,31 @@
+#!/bin/sh
+# Every exit, including core crashes, removes interception before procd respawns us.
+umask 077
+child=
+# shellcheck disable=SC2329
+cleanup() {
+    trap '' TERM INT
+    /usr/bin/fii firewall-down
+    if [ -n "$child" ]; then
+        kill "$child" 2>/dev/null
+        wait "$child" 2>/dev/null
+    fi
+}
+trap 'exit 0' TERM INT
+trap cleanup EXIT
+/etc/fii/bin/mihomo -d /etc/fii/core -f /tmp/fii/config.yaml &
+child=$!
+attempt=0
+while [ "$attempt" -lt 15 ]; do
+    kill -0 "$child" 2>/dev/null || exit 1
+    if /usr/bin/fii ready; then
+        /usr/bin/fii firewall-up || exit 1
+        logger -t fii 'Mihomo ready; configured traffic interception installed'
+        wait "$child"
+        exit $?
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+logger -t fii 'Mihomo did not become ready; traffic interception remains disabled'
+exit 1

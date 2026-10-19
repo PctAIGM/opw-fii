@@ -1,0 +1,260 @@
+"""Whitelisted rpcd / CLI operations. All external commands use argv, never shell strings."""
+import copy
+import json
+import re
+import secrets
+import subprocess
+import sys
+import time
+
+from . import __version__
+from .fetch import refresh
+from .model import MAX_DOCUMENT, check, import_backup, validate
+from .render import extract, render, validate_override
+from .runtime import INIT, activate, active, prepare, ready, run, status
+from .store import Store, lock, rooted, write_json
+
+READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "core_info", "core_check", "network")
+WRITE_METHODS = ("save", "refresh", "apply", "service", "import", "import_preview", "select", "core_update", "core_channel")
+LONG_METHODS = ("refresh", "apply", "service", "core_update", "core_check")
+
+
+def job_path(ident):
+    check(isinstance(ident, str) and bool(re.fullmatch(r"[a-f0-9]{32}", ident)), "任务 ID 无效")
+    return rooted("/tmp/fii/jobs/" + ident + ".json")
+
+
+def queue_job(method, payload):
+    ident = secrets.token_hex(16)
+    path = job_path(ident)
+    write_json(path, {"done": False, "method": method, "createdAt": int(time.time())})
+    for old in path.parent.glob("*.json"):
+        if re.fullmatch(r"[a-f0-9]{32}.json", old.name) and time.time() - old.stat().st_mtime > 86400:
+            old.unlink(missing_ok=True)
+    try:
+        subprocess.Popen([sys.executable, "/usr/bin/fii", "job-run", method, ident, json.dumps(payload)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise ValueError("无法启动后台任务") from None
+    return {"jobId": ident}
+
+
+def run_job(method, ident, payload):
+    check(method in LONG_METHODS, "任务操作无效")
+    path = job_path(ident)
+    started, last_report = int(time.time()), 0
+    def progress(message, received=0, total=0):
+        nonlocal last_report
+        if total and received < total and time.monotonic() - last_report < 1:
+            return
+        write_json(path, {"done": False, "method": method, "createdAt": started,
+                         "progress": {"message": message, "received": received, "total": total}})
+        last_report = time.monotonic()
+    try:
+        if method == "core_update":
+            from .core import install_core
+            operation = install_core(payload.get("channel"), payload.get("digest"), progress)
+        else:
+            operation = dispatch(method, payload)
+        result = {"done": True, "ok": True, "result": operation}
+    except Exception as exc:
+        result = {"done": True, "ok": False, "error": str(exc)[:3000]}
+    write_json(path, result)
+
+
+def validate_contents(data):
+    validate(data)
+    for source in data["sources"]:
+        if source.get("cachedYaml"):
+            source["nodeCount"] = len(extract(source["cachedYaml"]))
+    for override in data["overrides"]:
+        validate_override(override)
+    return data
+
+
+def refresh_one(kind, ident):
+    check(kind in ("sources", "overrides"), "刷新类型无效")
+    check(bool(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", ident)), "配置 ID 无效")
+    with lock("refresh-" + kind + "-" + ident, timeout=1):
+        with lock():
+            data = Store().read()
+            original = next((s for s in data[kind] if s["id"] == ident), None)
+            check(original is not None, "配置项不存在")
+            original = copy.deepcopy(original)
+        updated = copy.deepcopy(original)
+        success = refresh(updated, data["settings"], kind)
+        with lock():
+            latest = Store().read()
+            index = next((i for i, s in enumerate(latest[kind]) if s["id"] == ident), None)
+            check(index is not None and latest[kind][index] == original,
+                  "下载期间该配置已修改，未覆盖新数据，请重新刷新")
+            latest[kind][index] = updated
+            Store().save(latest, latest["revision"])
+        return {"success": success, "message": "刷新成功" if success else updated["lastError"]}
+
+
+def scheduled():
+    with lock("scheduler", timeout=0):
+        with lock():
+            data = Store().read()
+        changed = False
+        for kind in ("sources", "overrides"):
+            for item in data[kind]:
+                if not (item.get("enabled", True) and item.get("autoRefresh") and item.get("url")):
+                    continue
+                now = time.time()
+                last = item.get("lastRefreshAt", 0) or 0
+                attempt = item.get("lastAttemptAt", 0) or 0
+                if now - last >= item.get("refreshMinutes", 720) * 60 and now - attempt >= 300:
+                    try:
+                        changed = refresh_one(kind, item["id"])["success"] or changed
+                    except ValueError:
+                        pass
+        bundle = active()
+        if changed and data["settings"]["autoApply"] and bundle and ready(bundle):
+            activate(bundle["outputId"])
+
+
+def dispatch(method, payload=None):
+    payload = payload or {}
+    check(isinstance(payload, dict), "请求参数必须是对象")
+    if method == "job":
+        path = job_path(payload.get("id"))
+        check(path.exists(), "任务记录不存在，可能路由器已重启")
+        job = json.loads(path.read_text(encoding="utf-8"))
+        limit = 900 if job.get("method") == "core_update" else 180
+        if not job.get("done") and time.time() - job["createdAt"] > limit:
+            return {"done": True, "ok": False, "error": "任务未完成，请刷新页面并查看日志"}
+        return job
+    if method == "status":
+        return status()
+    if method == "network":
+        from .network import choices
+        return choices()
+    if method == "core_info":
+        from .core import local_info
+        return local_info()
+    if method == "core_check":
+        from .core import check_update
+        return check_update(payload.get("channel"))
+    if method == "core_channel":
+        from .core import select_channel
+        return select_channel(payload.get("channel"))
+    if method == "core_update":
+        from .core import install_core
+        return install_core(payload.get("channel"), payload.get("digest"))
+    if method == "groups":
+        from .runtime import groups
+        return groups()
+    if method == "select":
+        from .runtime import select_proxy
+        return select_proxy(payload.get("group"), payload.get("name"))
+    if method == "logs":
+        output = run(["/sbin/logread", "-e", "fii", "-l", "150"], required=False, timeout=4)
+        return {"text": output[-48000:]}
+    if method == "refresh":
+        return refresh_one(payload.get("kind", "sources"), str(payload.get("id", "")))
+    if method == "apply":
+        return activate(str(payload.get("id", "")))
+    if method == "service":
+        action = payload.get("action")
+        check(action in ("start", "stop", "restart"), "服务操作无效")
+        with lock("operation", timeout=1):
+            if action != "stop":
+                check(active() is not None, "请先应用一个输出配置")
+            run([INIT, action], timeout=15)
+            if action != "stop":
+                deadline = time.monotonic() + 18 + active()["settings"].get("tunTimeout", 30)
+                while time.monotonic() < deadline and not status()["running"]:
+                    time.sleep(0.5)
+                check(status()["running"], "服务启动失败，请查看日志")
+        return {"message": "服务操作完成"}
+    with lock():
+        store = Store()
+        data = store.read()
+        if method in ("get", "export"):
+            return {"data": data, "version": __version__}
+        if method == "preview":
+            result = render(data, str(payload.get("id", "")))
+            if payload.get("runtime"):
+                from .runtime import overlay
+                result["yaml"] = overlay(result["yaml"], data["settings"])
+            return result
+        if method == "nodes":
+            source = next((s for s in data["sources"] if s["id"] == str(payload.get("id", ""))), None)
+            check(source is not None and source.get("cachedYaml"), "暂无缓存，请先刷新订阅")
+            nodes = extract(source["cachedYaml"])
+            nodes = [p for p in nodes if
+                     (not source.get("includeRegex") or re.search(source["includeRegex"], p["name"])) and
+                     (not source.get("excludeRegex") or not re.search(source["excludeRegex"], p["name"]))]
+            return {"nodes": [{"name": source.get("prefix", "") + p["name"], "type": p.get("type", ""),
+                               "server": p.get("server", "")} for p in nodes]}
+        if method == "save":
+            new_data = validate_contents(copy.deepcopy(payload.get("data")))
+            store.save(new_data, payload.get("revision"))
+            return {"data": new_data, "message": "已保存；运行配置需在输出页点击应用"}
+        if method in ("import", "import_preview"):
+            imported, warnings = import_backup(payload.get("data"), data["settings"])
+            validate_contents(imported)
+            if method == "import":
+                store.save(imported, payload.get("revision"))
+            return {"data": imported, "warnings": warnings,
+                    "message": "备份已导入，运行配置保持当前版本，请在输出页预览后应用"}
+    raise ValueError("未知操作")
+
+
+def rpc_payload(raw):
+    # rpcd exec plugins deliver the ubus call params as flat JSON on stdin;
+    # the local preview harness wraps them as {"payload": "<json>"}.
+    envelope = json.loads(raw or "{}")
+    if isinstance(envelope.get("payload"), str):
+        return json.loads(envelope["payload"])
+    if isinstance(envelope.get("payload"), dict):
+        return envelope["payload"]
+    return envelope
+
+
+def main():
+    args = sys.argv[1:]
+    try:
+        if args == ["rpc-list"]:
+            print(json.dumps({method: {"payload": ""} for method in READ_METHODS + WRITE_METHODS}))
+            return
+        if args and args[0] == "rpc-call":
+            method = args[1] if len(args) > 1 else ""
+            check(method in READ_METHODS + WRITE_METHODS, "未知 RPC 操作")
+            raw = sys.stdin.read(MAX_DOCUMENT + 1)
+            check(len(raw) <= MAX_DOCUMENT, "请求过大")
+            payload = rpc_payload(raw)
+            result = queue_job(method, payload) if method in LONG_METHODS else dispatch(method, payload)
+            print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+        elif len(args) == 4 and args[0] == "job-run":
+            run_job(args[1], args[2], json.loads(args[3]))
+        elif args == ["prepare"]:
+            prepare()
+        elif args == ["ready"]:
+            sys.exit(0 if ready() else 1)
+        elif args == ["scheduled"]:
+            scheduled()
+        elif args == ["firewall-up"]:
+            from .runtime import firewall_up
+            firewall_up()
+        elif args == ["firewall-down"]:
+            from .runtime import firewall_down
+            firewall_down()
+        elif args == ["sync-boot"]:
+            bundle = active()
+            run([INIT, "enable" if bundle and bundle["settings"]["autostart"] else "disable"])
+        else:
+            method = args[0] if args else "get"
+            check(method in READ_METHODS + WRITE_METHODS, "用法: fii get|status|preview|save|refresh|apply|service|import|export|logs [JSON]")
+            payload = json.loads(args[1]) if len(args) > 1 else {}
+            print(json.dumps(dispatch(method, payload), ensure_ascii=False, indent=2))
+    except (ValueError, KeyError, TypeError, OSError, RecursionError) as exc:
+        if args and args[0].startswith("rpc-"):
+            print(json.dumps({"ok": False, "error": str(exc)[:3000]}, ensure_ascii=False))
+        else:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)

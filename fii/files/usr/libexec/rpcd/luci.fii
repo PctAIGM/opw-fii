@@ -1,0 +1,7 @@
+#!/bin/sh
+# rpcd exec plugin; access is controlled by luci-app-fii.json.
+case "$1" in
+    list) exec /usr/bin/fii rpc-list ;;
+    call) exec /usr/bin/fii rpc-call "$2" ;;
+esac
+exit 1

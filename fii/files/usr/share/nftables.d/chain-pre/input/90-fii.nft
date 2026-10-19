@@ -1,0 +1,3 @@
+# Only locally marked TPROXY packets are accepted here; marks cannot arrive over Ethernet.
+meta mark & 0x0000ffff == 0x0000f101 counter accept comment "fii tproxy"
+iifname "fii-tun" counter accept comment "fii tun input"
