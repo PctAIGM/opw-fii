@@ -24,7 +24,7 @@ rules:
 """
 
 
-class Loader(yaml.SafeLoader):
+class Loader(getattr(yaml, 'CSafeLoader', yaml.SafeLoader)):
     """YAML 1.2-like booleans: node names ON / OFF must stay strings."""
 
 
@@ -38,7 +38,7 @@ Loader.add_implicit_resolver("tag:yaml.org,2002:bool", re.compile(r"^(?:true|fal
 def load_map(body):
     try:
         # Reject cycles and alias expansion bombs before constructing the document.
-        aliases = sum(isinstance(event, yaml.events.AliasEvent) for event in yaml.parse(body))
+        aliases = sum(isinstance(event, yaml.events.AliasEvent) for event in yaml.parse(body, Loader=Loader))
         check(aliases <= 64, "YAML 别名过多")
         result = yaml.load(body, Loader=Loader)
         check(result is None or isinstance(result, dict), "YAML 根节点必须是对象")
@@ -50,7 +50,7 @@ def load_map(body):
 
 
 def dump(data):
-    return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
+    return yaml.dump(data, Dumper=getattr(yaml, 'CSafeDumper', yaml.SafeDumper), allow_unicode=True, sort_keys=False, width=120)
 
 
 def decode64(value):
@@ -200,7 +200,7 @@ def validate_override(override):
                       "规则格式无效: " + line[:100])
 
 
-def render(data, output_id):
+def render(data, output_id, progress=None):
     output = next((p for p in data["outputs"] if p["id"] == output_id), None)
     check(output is not None and output.get("enabled", True), "输出不存在或已禁用")
     sources = {s["id"]: s for s in data["sources"]}
@@ -217,6 +217,8 @@ def render(data, output_id):
             continue
         if source.get("lastError"):
             warnings.append("使用上次成功缓存: " + source["name"])
+        if progress:
+            progress('正在解析订阅：' + source['name'])
         for p in extract(source["cachedYaml"]):
             name = p["name"]
             if source.get("includeRegex") and not re.search(source["includeRegex"], name):
@@ -236,10 +238,14 @@ def render(data, output_id):
     root["proxies"] = proxies
     overrides = {o["id"]: o for o in data["overrides"]}
     ordered_ids = list(dict.fromkeys([o["id"] for o in data["overrides"] if o.get("global")] + output["overrideIds"]))
+    applied = []
     for ident in ordered_ids:
         override = overrides[ident]
         if not override.get("enabled", True):
             continue
+        if progress:
+            progress('正在执行覆写 %d：%s' % (len(applied) + 1, override['name']))
+        applied.append({key: override.get(key) for key in ('id', 'name', 'type', 'global')})
         if override["type"] == "JS":
             from .javascript import execute
             try:
@@ -255,4 +261,7 @@ def render(data, output_id):
                      if s.strip() and not s.lstrip().startswith("#")]
             root["rules"] = rules + root.get("rules", [])
     check(isinstance(root.get('proxies', []), list), '生成配置的 proxies 必须是列表')
-    return {"yaml": dump(root), "nodeCount": len(root.get("proxies", [])), "warnings": warnings, "name": output["name"]}
+    if progress:
+        progress('正在生成 YAML…')
+    return {"yaml": dump(root), "nodeCount": len(root.get("proxies", [])), "warnings": warnings, "name": output["name"],
+            "appliedOverrides": applied}

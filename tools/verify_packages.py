@@ -31,6 +31,10 @@ def verify():
                 for member in archive.getmembers():
                     if member.name != "./control":
                         assert member.mode == 0o755
+                        script = archive.extractfile(member).read()
+                        assert b'/etc/init.d/rpcd restart' not in script, 'Package hooks must preserve LuCI sessions'
+                        if member.name == './postrm' or (record['file'].startswith('luci-app-fii_') and member.name == './postinst'):
+                            assert b'/etc/init.d/rpcd reload' in script
             size = len(gzip.decompress(outer.extractfile("./data.tar.gz").read()))
             assert "Installed-Size: %d\n" % size in control
             with tarfile.open(fileobj=io.BytesIO(outer.extractfile("./data.tar.gz").read()), mode="r:gz") as archive:
@@ -56,6 +60,8 @@ def verify():
                     assert not data.startswith(b"\x7fELF"), "Application IPK must not contain a core binary"
                     if data.startswith(b"#!"):
                         assert member.mode == 0o755 and b"\r\n" not in data
+                    if member.name == './etc/uci-defaults/90-fii':
+                        assert b'/etc/init.d/rpcd reload' in data and b'/etc/init.d/rpcd restart' not in data
                 assert "./usr/bin/mihomo" not in names and "./etc/fii/bin/mihomo" not in names
         result.append({"package": record["file"], "entries": len(names), "verified": True})
     print(json.dumps(result, indent=2))

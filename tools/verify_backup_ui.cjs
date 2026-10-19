@@ -8,12 +8,18 @@ const path = require('node:path');
     const output = path.resolve(__dirname, '../build/vm');
     const browser = await chromium.launch({channel:'chrome',headless:true});
     const page = await browser.newPage({viewport:{width:1440,height:1050}});
-    const errors = [], requests = [], results = [];
+    const errors = [], requests = [], frames = [], results = [];
+    let confirmationMetrics;
     let faultInjection = false, rejectedPosts = 0, rejectedReplies = 0, lostAcknowledgements = 0;
     page.on('pageerror', e => errors.push(e.message));
     page.on('requestfailed', r => { if (!faultInjection) errors.push(r.failure().errorText); });
     page.on('request', r => {
-        if (r.method() === 'POST' && r.url().includes('ubus')) requests.push(Buffer.byteLength(r.postData() || ''));
+        if (r.method() === 'POST' && r.url().includes('ubus')) {
+            const bytes=Buffer.byteLength(r.postData() || ''); requests.push(bytes);
+            let method;
+            try {method=r.postDataJSON().params?.[2];} catch {}
+            frames.push({method,bytes});
+        }
     });
     let original, initial;
     async function rpc(method, payload={}) {
@@ -59,7 +65,7 @@ const path = require('node:path');
     }
     const backup = {
         format:'subconverter-backup',version:1,
-        sources:[{id:7,name:'导入测试订阅',cachedYaml:'proxies:\n - {name: Imported, type: ss, server: node.example.com, port: 443, cipher: aes-128-gcm, password: test}\n# 中文🚀 '+ 'a'.repeat(2*1024*1024)+'\n'}],
+        sources:[{id:7,name:'导入测试订阅',url:' \nhttps://example.com/sub\t ',cachedYaml:'proxies:\n - {name: Imported, type: ss, server: node.example.com, port: 443, cipher: aes-128-gcm, password: test}\n# 中文🚀 '+ 'a'.repeat(2*1024*1024)+'\n'}],
         templates:[{id:2,name:'规则',type:'RULES',yamlBody:'DOMAIN,example.com,DIRECT'}],
         outputProfiles:[{id:9,name:'导入测试输出',sourceIds:'7',overrideIds:'2'}]
     };
@@ -79,11 +85,20 @@ const path = require('node:path');
             await page.screenshot({path:path.join(output,'backup-preview.png')});
         });
         await check('confirmed import reloads large state and preserves router settings and active snapshot', async () => {
+            const from=frames.length, started=performance.now();
             await page.getByRole('button',{name:'导入并替换配置库',exact:true}).click();
             await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).find(x=>x.textContent === '导入并替换配置库')?.disabled, null, {timeout:180000});
             assert.equal(await page.evaluate(() => document.body.classList.contains('modal-overlay-active')),false,'Import did not close confirmation dialog');
+            const confirmation=frames.slice(from);
+            confirmationMetrics={milliseconds:Math.round(performance.now()-started),requests:confirmation.length,
+                postedBytes:confirmation.reduce((n,r)=>n+r.bytes,0),maxPostBytes:Math.max(...confirmation.map(r=>r.bytes)),methods:confirmation.map(r=>r.method)};
+            assert.ok(confirmation.some(r=>r.method==='import'));
+            assert.ok(!confirmation.some(r=>['transfer_begin','transfer_append','transfer_invoke'].includes(r.method)),'Confirmation uploaded the backup again');
+            assert.ok(confirmationMetrics.maxPostBytes<1024,'Confirmation request contains backup contents');
+            console.log('Token-only confirmation:',JSON.stringify(confirmationMetrics));
             const current=(await rpc('get')).data, status=await rpc('status');
             assert.equal(current.sources[0].cachedYaml,backup.sources[0].cachedYaml);
+            assert.equal(current.sources[0].url,'https://example.com/sub');
             assert.deepEqual(current.settings,original.settings);
             assert.equal(status.activeOutputId,initial.activeOutputId);
             assert.equal(status.appliedRevision,initial.appliedRevision);
@@ -111,12 +126,59 @@ const path = require('node:path');
             assert.equal((await rpc('status')).appliedRevision,initial.appliedRevision);
             await page.getByRole('button',{name:'备份与迁移',exact:true}).click();
         });
+        await check('URL errors identify each source and override inline without leaking addresses or changing state', async () => {
+            const before=(await rpc('get')).data;
+            await choose({format:'subconverter-backup',version:1,
+                sources:[{id:7,name:'缺少协议',url:'example.com/private-token'},
+                    {id:8,name:'认证订阅',url:'https://user:private-password@example.com/sub'}],
+                templates:[{id:2,name:'远程脚本',type:'JS',remoteUrl:'https:///private-token',yamlBody:''}],outputProfiles:[]});
+            const alert=page.locator('#modal_overlay').getByRole('alert');
+            await alert.filter({hasText:'3 项地址错误'}).waitFor({timeout:45000});
+            const message=await alert.innerText();
+            for(const part of ['订阅「缺少协议」（ID: 7）','订阅「认证订阅」（ID: 8）','覆写「远程脚本」（ID: 2）','内嵌用户名密码','缺少域名']) assert.ok(message.includes(part),message);
+            for(const secret of ['private-token','private-password','example.com']) assert.ok(!message.includes(secret));
+            assert.deepEqual((await rpc('get')).data,before);
+            assert.equal(await page.getByRole('heading',{name:'确认导入',exact:true}).count(),0);
+            await page.screenshot({path:path.join(output,'backup-url-errors.png')});
+            await page.getByRole('button',{name:'取消',exact:true}).click();
+        });
         await check('invalid backup reports validation error and keeps saved state', async () => {
             const before=(await rpc('get')).data.revision;
             await choose({...backup,templates:[{id:2,name:'Unsupported type',type:'UNKNOWN',yamlBody:''}]});
             await page.getByText('覆写类型必须是 YAML、RULES 或 JS',{exact:true}).waitFor({timeout:180000});
             assert.equal((await rpc('get')).data.revision,before);
             await page.getByRole('button',{name:'取消',exact:true}).click();
+        });
+        const small={...backup,sources:[{...backup.sources[0],cachedYaml:backup.sources[0].cachedYaml.split('#')[0]}]};
+        async function cancelChecked() {
+            const released=page.waitForResponse(r=>{
+                try {return r.request().postDataJSON().params?.[2]==='transfer_release';} catch {return false;}
+            });
+            await page.getByRole('button',{name:'取消',exact:true}).click();
+            await released;
+        }
+        await check('canceling a checked backup releases its cached contents without changing revision',async()=>{
+            const before=(await rpc('get',{compact:true})).data.revision;
+            await choose(small);
+            await page.getByRole('heading',{name:'确认导入',exact:true}).waitFor();
+            await cancelChecked();
+            assert.equal((await rpc('get',{compact:true})).data.revision,before);
+        });
+        await check('a configuration change after checking blocks confirmation without uploading again',async()=>{
+            await choose(small);
+            await page.getByRole('heading',{name:'确认导入',exact:true}).waitFor();
+            const before=(await rpc('get',{compact:true})).data;
+            await rpc('save',{patch:{settings:{userAgent:'backup-race-test'}},compact:true,revision:before.revision});
+            const from=frames.length;
+            await page.getByRole('button',{name:'导入并替换配置库',exact:true}).click();
+            await page.getByRole('alert').filter({hasText:'配置在检查备份后已变化'}).waitFor({timeout:30000});
+            assert.ok(!frames.slice(from).some(r=>r.method==='transfer_append'));
+            const after=(await rpc('get',{compact:true})).data;
+            assert.equal(after.revision,before.revision+1);assert.equal(after.settings.userAgent,'backup-race-test');
+            await cancelChecked();
+            await page.reload();
+            await page.getByRole('button',{name:'路由器设置',exact:true}).click();
+            await page.getByRole('button',{name:'备份与迁移',exact:true}).click();
         });
         await check('1.86 MiB preview retries under 4 KiB POST limit and a lost upload acknowledgement', async () => {
             faultInjection = true;
@@ -178,7 +240,7 @@ const path = require('node:path');
             const current=(await rpc('get')).data;
             await rpc('save',{data:original,revision:current.revision});
         }
-        await fs.writeFile(path.join(output,'backup-ui-results.json'),JSON.stringify({results,maxPostBytes:Math.max(...requests),rejectedPosts,rejectedReplies,lostAcknowledgements,errors},null,2));
+        await fs.writeFile(path.join(output,'backup-ui-results.json'),JSON.stringify({results,confirmationMetrics,maxPostBytes:Math.max(...requests),rejectedPosts,rejectedReplies,lostAcknowledgements,errors},null,2));
         await browser.close();
     }
 })().catch(e=>{console.error(e);process.exitCode=1});

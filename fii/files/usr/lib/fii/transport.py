@@ -16,6 +16,7 @@ MAX_REQUEST = MAX_DOCUMENT + 4096
 MAX_RESPONSE = MAX_DOCUMENT * 2
 QUOTA = MAX_DOCUMENT * 4
 TTL = 3600
+IMPORT_TTL = 15 * 60
 
 
 def directory():
@@ -32,14 +33,15 @@ def path_for(ident, suffix):
 def reserve(size):
     used, count = 0, 0
     for path in directory().iterdir():
-        if not re.fullmatch(r'[a-f0-9]{32}\.(meta|in|out)', path.name):
+        if not re.fullmatch(r'[a-f0-9]{32}\.(meta|in|out|checked)', path.name):
             continue
-        if time.time() - path.stat().st_mtime > TTL:
+        ttl = IMPORT_TTL if path.suffix == '.checked' else TTL
+        if time.time() - path.stat().st_mtime > ttl:
             path.unlink(missing_ok=True)
         elif path.suffix == '.meta':
             used += json.loads(path.read_text(encoding='utf-8'))['size']
             count += 1
-        elif path.suffix == '.out':
+        elif path.suffix in ('.out', '.checked'):
             used += path.stat().st_size
             count += 1
     check(used + size <= QUOTA and count < 64, '临时传输空间已满，请稍后重试')
@@ -48,7 +50,7 @@ def reserve(size):
 def release(ident):
     checked_id(ident)
     with lock('transfers'):
-        for suffix in ('.in', '.meta', '.out'):
+        for suffix in ('.in', '.meta', '.out', '.checked'):
             path_for(ident, suffix).unlink(missing_ok=True)
     return {}
 

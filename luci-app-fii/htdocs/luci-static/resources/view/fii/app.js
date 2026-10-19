@@ -46,7 +46,7 @@ async function rpcReply(name, payload, onProgress) {
                 var data = Uint8Array.from(atob(part.result.data), function(c) { return c.charCodeAt(0); });
                 if (!data.length || offset + data.length > bytes.length) throw new Error('响应分块大小无效');
                 bytes.set(data, offset); offset += data.length;
-                if (onProgress) onProgress({ message: '正在读取检查结果…', received: offset, total: bytes.length });
+                if (onProgress) onProgress({ message: '正在读取结果…', received: offset, total: bytes.length });
             }
             reply = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
         } finally {
@@ -85,7 +85,7 @@ async function call(name, payload, onProgress) {
     var result = reply.result;
     if (result && result.jobId) {
         for (var i = 0; i < (name === 'core_update' ? 1200 : 260); i++) {
-            await new Promise(function(resolve) { window.setTimeout(resolve, 750); });
+            await new Promise(function(resolve) { window.setTimeout(resolve, Math.min(750, 100 * Math.pow(2, Math.min(i, 3)))); });
             var job = await call('job', { id: result.jobId }, onProgress);
             if (onProgress && job.progress) onProgress(job.progress);
             if (job.done) {
@@ -172,11 +172,29 @@ function download(name, content, mime) {
     window.setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
 }
 
-function choices(items, initial) {
-    var selected = initial.slice(), host = E('div', { 'class': 'fii-choices' });
+function effectiveOverrides(items, selected) {
+    var ordered = items.filter(function(item) { return item.global; }).concat(selected.map(function(id) {
+        return items.find(function(item) { return item.id === id; });
+    }).filter(Boolean)), used = {};
+    return ordered.filter(function(item) {
+        if (used[item.id] || item.enabled === false) return false;
+        used[item.id] = true; return true;
+    });
+}
+
+function executionList(items) {
+    return items.length ? E('ol', { 'class': 'fii-execution', 'aria-label': '覆写执行顺序' }, items.map(function(item) {
+        return E('li', { 'data-id': item.id }, [E('span', {}, item.name), badge(item.global ? '全局' : '专属'), badge(item.type)]);
+    })) : E('p', { 'class': 'fii-muted' }, '没有启用的覆写');
+}
+
+function choices(items, initial, overrideMode) {
+    var selected = initial.filter(function(id) { return !overrideMode || !items.some(function(item) { return item.id === id && item.global; }); });
+    var host = E('div', { 'class': 'fii-choices' });
     function draw() {
+        var selectable = overrideMode ? items.filter(function(item) { return !item.global; }) : items;
         var ordered = selected.map(function(id) { return items.find(function(item) { return item.id === id; }); }).filter(Boolean)
-            .concat(items.filter(function(item) { return selected.indexOf(item.id) < 0; }));
+            .concat(selectable.filter(function(item) { return selected.indexOf(item.id) < 0; }));
         host.replaceChildren.apply(host, ordered.map(function(item) {
             var index = selected.indexOf(item.id);
             var checkbox = E('input', { type: 'checkbox', change: function() {
@@ -185,12 +203,24 @@ function choices(items, initial) {
             } });
             checkbox.checked = index >= 0;
             return E('div', { 'class': 'fii-choice' }, [E('label', {}, [checkbox,
-                E('span', {}, item.name + (item.global ? ' · 全局' : '') + (item.enabled === false ? ' · 已禁用' : ''))]),
+                E('span', {}, (index >= 0 ? (index + 1) + '. ' : '') + item.name + (item.enabled === false ? ' · 已禁用，不执行' : ''))]),
                 index >= 0 ? actions([
                     button('上移', function() { var tmp = selected[index - 1]; selected[index - 1] = item.id; selected[index] = tmp; draw(); }, false, { disabled: index === 0, 'aria-label': '上移 ' + item.name }),
                     button('下移', function() { var tmp = selected[index + 1]; selected[index + 1] = item.id; selected[index] = tmp; draw(); }, false, { disabled: index === selected.length - 1, 'aria-label': '下移 ' + item.name })
                 ]) : '' ]);
         }));
+        if (overrideMode) {
+            var globals = items.filter(function(item) { return item.global; });
+            var automatic = E('div', { 'class': 'fii-global-choices' }, globals.map(function(item) {
+                var checked = E('input', { type: 'checkbox', disabled: 'disabled' });
+                checked.checked = item.enabled !== false;
+                return E('div', { 'class': 'fii-choice' }, [E('label', {}, [checked, E('span', {}, item.name)]),
+                    badge(item.enabled === false ? '全局 · 已禁用' : '全局 · 自动生效', item.enabled === false ? '' : 'success')]);
+            }));
+            host.prepend(E('h4', {}, '全局覆写（自动生效）'), globals.length ? automatic : E('p', { 'class': 'fii-muted' }, '暂无全局覆写'),
+                E('h4', {}, '专属覆写（勾选后按顺序执行）'));
+            host.append(E('h4', {}, '实际执行顺序'), executionList(effectiveOverrides(items, selected)));
+        }
         if (!items.length) host.appendChild(E('p', { 'class': 'fii-muted' }, '暂无可选项'));
     }
     draw();
@@ -313,7 +343,7 @@ return view.extend({
     handleSave: null,
     handleReset: null,
 
-    load: function() { return Promise.all([call('get'), call('status'), call('network').catch(function(err) { return { error: err.message }; })]); },
+    load: function() { return Promise.all([call('get', { compact: true }), call('status'), call('network').catch(function(err) { return { error: err.message }; })]); },
 
     render: function(result) {
         this.data = result[0].data;
@@ -379,15 +409,19 @@ return view.extend({
         this.body.replaceChildren(this[this.tab + 'Page']()); this.drawStatus();
     },
 
-    save: async function(next) {
-        var result = await call('save', { data: next, revision: this.data.revision });
+    save: async function(patch) {
+        var result = await call('save', { patch: patch, compact: true, revision: this.data.revision });
         this.data = result.data; this.draw(); notify(result.message);
     },
 
-    put: async function(kind, item) {
-        var next = JSON.parse(JSON.stringify(this.data)), index = next[kind].findIndex(function(v) { return v.id === item.id; });
-        if (index < 0) next[kind].push(item); else next[kind][index] = item;
-        await this.save(next);
+    put: async function(kind, item, original) {
+        var existing = this.data[kind].find(function(v) { return v.id === item.id; });
+        if (!existing) return this.save({ kind: kind, item: item });
+        var before = original || existing, fields = {};
+        Object.keys(item).forEach(function(key) {
+            if (item[key] !== before[key] && JSON.stringify(item[key]) !== JSON.stringify(before[key])) fields[key] = item[key];
+        });
+        await this.save({ kind: kind, id: item.id, fields: fields });
     },
 
     remove: function(kind, item) {
@@ -395,13 +429,7 @@ return view.extend({
         ui.showModal('删除“' + item.name + '”', [E('p', {}, '将移除这个配置项及它在输出中的关联。正在运行的配置保留到下次应用。'), actions([
             button('取消', function() { ui.hideModal(); }),
             button('删除', async function() {
-                var next = JSON.parse(JSON.stringify(self.data));
-                next[kind] = next[kind].filter(function(v) { return v.id !== item.id; });
-                next.outputs.forEach(function(v) {
-                    if (kind === 'sources') v.sourceIds = v.sourceIds.filter(function(id) { return id !== item.id; });
-                    if (kind === 'overrides') v.overrideIds = v.overrideIds.filter(function(id) { return id !== item.id; });
-                });
-                await self.save(next); ui.hideModal();
+                await self.save({ kind: kind, remove: item.id }); ui.hideModal();
             }, false, { 'class': 'cbi-button cbi-button-negative' })
         ])]);
     },
@@ -445,7 +473,7 @@ return view.extend({
                 E('li', {}, [E('strong', {}, '添加订阅源'), E('p', {}, '输入订阅 URL，也可以粘贴完整 Mihomo YAML 或分享链接。')]),
                 E('li', {}, [E('strong', {}, '按需添加覆写'), E('p', {}, '添加代理组、分流规则或 DNS 配置。全局覆写可复用于多个输出。')]),
                 E('li', {}, [E('strong', {}, '组合输出并应用'), E('p', {}, '选择订阅和覆写，预览生成结果，然后应用到路由器。')])
-            ]), actions([button('添加订阅源', function() { self.editSource(); }, true), button('从备份导入', function() { self.importBackup(); })])]),
+            ]), actions([button('添加订阅源', function() { return self.editSource(); }, true), button('从备份导入', function() { self.importBackup(); })])]),
             E('p', { 'class': 'fii-muted' }, '适配 OpenWrt 24.10 / firewall4。FII 与其他透明代理插件使用时，应先停止其他插件的接管。')
         ]);
     },
@@ -521,7 +549,7 @@ return view.extend({
 
     sourcesPage: function() {
         var self = this;
-        return E('div', {}, [this.pageHeading('订阅源', '一个订阅只维护一次，可用于多个输出。', button('添加订阅源', function() { self.editSource(); }, true)),
+        return E('div', {}, [this.pageHeading('订阅源', '一个订阅只维护一次，可用于多个输出。', button('添加订阅源', function() { return self.editSource(); }, true)),
             this.data.sources.length ? E('div', { 'class': 'fii-grid' }, this.data.sources.map(function(source) {
                 var used = (source.uploadBytes || 0) + (source.downloadBytes || 0);
                 var exhausted = isExhausted(source);
@@ -533,7 +561,7 @@ return view.extend({
                     exhausted ? E('p', { 'class': 'fii-notice' }, '生成输出时自动排除，额度恢复后自动加入。') : '',
                     source.lastError ? E('p', { 'class': 'fii-error' }, source.lastError) : '',
                     actions([button('刷新', async function() { var result = await call('refresh', { kind: 'sources', id: source.id }); notify(result.message, !result.success); await self.reload(); }, false, { disabled: !source.url }),
-                        button('节点', function() { return self.nodes(source); }), button('编辑', function() { self.editSource(source); }), button('删除', function() { self.remove('sources', source); })])]);
+                        button('节点', function() { return self.nodes(source); }), button('编辑', function() { return self.editSource(source); }), button('删除', function() { self.remove('sources', source); })])]);
             })) : empty('添加第一个订阅', '支持 Mihomo YAML，以及 SS、VMess、VLESS、Trojan、Hysteria2 常见分享链接。')]);
     },
 
@@ -556,8 +584,25 @@ return view.extend({
         window.setTimeout(function() { var input = form.querySelector('input,textarea,select'); if (input) input.focus(); }, 50);
     },
 
-    editSource: function(source) {
-        var self = this, item = Object.assign({ id: 's_' + Date.now().toString(36), name: '', url: '', enabled: true, autoRefresh: true, refreshMinutes: 720 }, source || {});
+    readItem: async function(kind, item, metadataOnly, editing) {
+        if (!item) return item;
+        var result = await call('get', { kind: kind, id: item.id, sync: true, metadataOnly: !!metadataOnly });
+        if (editing && result.revision !== this.data.revision) throw new Error('编辑期间配置已更新，请重新打开编辑窗口以读取最新内容');
+        this.data = result.data; this.draw();
+        return result.item;
+    },
+
+    editSource: async function(source) {
+        if (source) {
+            var pending = E('p', { role: 'status' }, '正在读取订阅…');
+            ui.showModal('编辑订阅源', [pending, actions([button('取消', function() { ui.hideModal(); })])], 'fii-modal');
+            try { source = await this.readItem('sources', source, true); }
+            catch (err) { if (pending.isConnected) { pending.textContent = err.message; pending.setAttribute('role', 'alert'); } return; }
+            if (!pending.isConnected || !document.body.classList.contains('modal-overlay-active')) return;
+        }
+        var self = this, item = Object.assign({ id: 's_' + Date.now().toString(36), name: '', url: '', enabled: true, autoRefresh: !source, refreshMinutes: 720 }, source || {});
+        var original = Object.assign({}, item);
+        var contentLoaded = !item.contentOmitted, loading = false;
         var name = field('名称', item.name, { required: true });
         var url = field('订阅 URL', item.url, { type: 'url', help: 'URL 和本地内容至少填写一项。远程下载失败时保留上次成功缓存。' });
         var enabled = toggle('启用订阅', item.enabled);
@@ -568,10 +613,26 @@ return view.extend({
         var auto = toggle('自动刷新', item.autoRefresh);
         var interval = field('刷新间隔（分钟）', item.refreshMinutes, { type: 'number', min: 5, max: 525600, required: true });
         var body = field('本地内容 / 上次成功缓存', item.cachedYaml || '', { area: true, code: true, rows: 8, help: '粘贴 Mihomo YAML 或分享链接。只提供 URL 时，保存后点击刷新。' });
-        var advanced = E('details', {}, [E('summary', {}, '筛选、刷新与本地内容'), prefix.node, include.node, exclude.node, agent.node, auto.node, interval.node, body.node]);
+        var contentStatus = E('p', { role: 'status', 'class': 'fii-muted' }, '');
+        var content = E('details', {}, [E('summary', {}, '本地内容 / 上次成功缓存'), contentStatus, body.node]);
+        body.control.disabled = !contentLoaded;
+        content.addEventListener('toggle', async function() {
+            if (!content.open || contentLoaded || loading) return;
+            loading = true; contentStatus.textContent = '正在读取内容…';
+            try {
+                var full = await self.readItem('sources', item, false, true);
+                body.control.value = full.cachedYaml || ''; original.cachedYaml = full.cachedYaml;
+                item.cachedYaml = full.cachedYaml; contentLoaded = true; body.control.disabled = false;
+                contentStatus.textContent = '';
+            } catch (err) { contentStatus.textContent = err.message; }
+            finally { loading = false; }
+        });
+        var advanced = E('details', {}, [E('summary', {}, '筛选、刷新与本地内容'), prefix.node, include.node, exclude.node, agent.node, auto.node, interval.node, content]);
         this.editor(source ? '编辑订阅源' : '添加订阅源', [name, url, enabled, advanced], async function() {
-            await self.put('sources', Object.assign(item, { name: name.read(), url: url.read(), enabled: enabled.read(), prefix: prefix.read(),
-                includeRegex: include.read(), excludeRegex: exclude.read(), userAgent: agent.read(), autoRefresh: auto.read(), refreshMinutes: interval.read(), cachedYaml: body.read() }));
+            Object.assign(item, { name: name.read(), url: url.read(), enabled: enabled.read(), prefix: prefix.read(),
+                includeRegex: include.read(), excludeRegex: exclude.read(), userAgent: agent.read(), autoRefresh: auto.read(), refreshMinutes: interval.read() });
+            if (contentLoaded) item.cachedYaml = body.read();
+            await self.put('sources', item, original);
         });
     },
 
@@ -584,18 +645,56 @@ return view.extend({
 
     overridesPage: function() {
         var self = this;
-        return E('div', {}, [this.pageHeading('覆写', '全局覆写先执行，专属覆写按输出中的选择顺序执行，同一覆写只执行一次。', button('添加覆写', function() { self.editOverride(); }, true)),
-            this.data.overrides.length ? E('div', { 'class': 'fii-grid' }, this.data.overrides.map(function(item) {
-                return E('article', { 'class': 'fii-card' }, [E('div', { 'class': 'fii-card-heading' }, [E('h3', {}, item.name), badge(item.type)]),
-                    E('p', { 'class': 'fii-muted' }, (item.global ? '全局覆写' : '专属覆写') + ' · ' + (item.enabled === false ? '已禁用' : '已启用')),
-                    E('pre', { 'class': 'fii-snippet' }, (item.body || '空覆写').slice(0, 240)), item.lastError ? E('p', { 'class': 'fii-error' }, item.lastError) : '',
-                    actions([button('编辑', function() { self.editOverride(item); }), button('刷新', async function() { var r = await call('refresh', { kind: 'overrides', id: item.id }); notify(r.message, !r.success); await self.reload(); }, false, { disabled: !item.url }),
+        return E('div', {}, [this.pageHeading('覆写', '全局覆写先执行，专属覆写按输出中的选择顺序执行，同一覆写只执行一次。', button('添加覆写', function() { return self.editOverride(); }, true)),
+            E('p', { 'class': 'fii-muted' }, '全局覆写先按列表顺序执行，专属覆写在输出中选择和排序。每份输出都会显示实际执行顺序。'),
+            this.data.overrides.length ? E('div', { 'class': 'fii-override-list', 'aria-label': '覆写列表' }, this.data.overrides.map(function(item, index) {
+                return E('article', { 'class': 'fii-card fii-override-row', 'data-id': item.id }, [E('div', { 'class': 'fii-card-heading' }, [
+                    E('div', { 'class': 'fii-order-heading' }, [E('span', { 'class': 'fii-order-number', 'aria-label': '列表第 ' + (index + 1) + ' 项' }, String(index + 1)), E('h3', {}, item.name)]),
+                    actions([badge(item.type), badge(item.global ? '全局' : '专属'), badge(item.enabled === false ? '已禁用' : '已启用', item.enabled === false ? '' : 'success')])]),
+                    E('p', { 'class': 'fii-muted' }, item.url ? '远程覆写 · ' + date(item.lastRefreshAt) : '本地覆写 · 编辑内容后保存'),
+                    E('details', {}, [E('summary', {}, '内容摘要'), E('pre', { 'class': 'fii-snippet' }, (item.snippet || item.body || '空覆写').slice(0, 240))]),
+                    item.lastError ? E('p', { 'class': 'fii-error' }, item.lastError) : '',
+                    actions([button('上移', function() { return self.moveOverride(item, index - 1); }, false, { disabled: index === 0, 'aria-label': '上移 ' + item.name }),
+                        button('下移', function() { return self.moveOverride(item, index + 1); }, false, { disabled: index === self.data.overrides.length - 1, 'aria-label': '下移 ' + item.name }),
+                        button('移动到…', function() { self.positionOverride(item); }, false, { 'aria-label': '移动 ' + item.name + ' 到指定位置' }),
+                        button('编辑', function() { return self.editOverride(item); }),
+                        item.url ? button('刷新远程内容', async function() { var r = await call('refresh', { kind: 'overrides', id: item.id }); notify(r.message, !r.success); await self.reload(); }) : '',
                         button('删除', function() { self.remove('overrides', item); })])]);
             })) : empty('按需扩展配置', '覆写可以添加代理组、插入规则，或调整 Mihomo 配置。无需覆写也可以使用默认 PROXY 代理组。')]);
     },
 
-    editOverride: function(override) {
+    moveOverride: async function(item, position) {
+        var order = this.data.overrides.map(function(value) { return value.id; }), current = order.indexOf(item.id);
+        if (current < 0 || position < 0 || position >= order.length || position === current) return;
+        order.splice(current, 1); order.splice(position, 0, item.id);
+        await this.save({ kind: 'overrides', order: order });
+        var row = Array.from(this.body.querySelectorAll('.fii-override-row')).find(function(node) { return node.dataset.id === item.id; });
+        if (row) { row.scrollIntoView({ block: 'nearest' }); row.querySelector('button').focus({ preventScroll: true }); }
+    },
+
+    positionOverride: function(item) {
+        var self = this, position = field('移动到第几项', this.data.overrides.findIndex(function(value) { return value.id === item.id; }) + 1,
+            { type: 'number', min: 1, max: this.data.overrides.length, required: true });
+        this.editor('移动“' + item.name + '”', [position], async function() { await self.moveOverride(item, position.read() - 1); });
+    },
+
+    editOverride: async function(override) {
+        var pending;
+        if (override) {
+            pending = E('p', { role: 'status', 'class': 'fii-muted' }, '正在读取覆写…');
+            ui.showModal('编辑覆写', [pending, actions([button('取消', function() { ui.hideModal(); })])], 'fii-modal');
+        }
+        try { override = await this.readItem('overrides', override); }
+        catch (err) {
+            if (!pending) throw err;
+            if (pending.isConnected && document.body.classList.contains('modal-overlay-active')) {
+                pending.textContent = err.message; pending.setAttribute('role', 'alert');
+            }
+            return;
+        }
+        if (pending && (!pending.isConnected || !document.body.classList.contains('modal-overlay-active'))) return;
         var self = this, item = Object.assign({ id: 'o_' + Date.now().toString(36), name: '', type: 'YAML', body: 'rules+: []\n', enabled: true, global: false, refreshMinutes: 720 }, override || {});
+        var original = Object.assign({}, item);
         var name = field('名称', item.name, { required: true });
         var type = field('类型', item.type, { select: [['YAML', 'YAML 覆写'], ['RULES', '规则列表'], ['JS', 'JavaScript 覆写']] });
         var enabled = toggle('启用覆写', item.enabled), global = toggle('全局覆写', item.global, '自动应用于所有输出。');
@@ -611,7 +710,7 @@ return view.extend({
         this.editor(override ? '编辑覆写' : '添加覆写', [name, type, enabled, global, body,
             E('details', {}, [E('summary', {}, '远程更新'), url.node, auto.node, interval.node])], async function() {
             await self.put('overrides', Object.assign(item, { name: name.read(), type: type.read(), enabled: enabled.read(), global: global.read(), body: body.read(),
-                url: url.read(), autoRefresh: auto.read(), refreshMinutes: interval.read() }));
+                url: url.read(), autoRefresh: auto.read(), refreshMinutes: interval.read() }), original);
         });
     },
 
@@ -621,30 +720,59 @@ return view.extend({
             this.data.outputs.length ? E('div', { 'class': 'fii-grid' }, this.data.outputs.map(function(item) {
                 var current = self.status.activeOutputId === item.id;
                 return E('article', { 'class': 'fii-card' + (current ? ' fii-selected' : '') }, [E('div', { 'class': 'fii-card-heading' }, [E('h3', {}, item.name), current ? badge('当前配置', 'success') : badge(item.enabled === false ? '已禁用' : '未应用')]),
-                    E('p', {}, item.sourceIds.length + ' 个订阅 · ' + item.overrideIds.length + ' 个专属覆写'),
+                    E('p', {}, item.sourceIds.length + ' 个订阅 · ' + effectiveOverrides(self.data.overrides, item.overrideIds).length + ' 个生效覆写'),
                     E('p', { 'class': 'fii-muted' }, item.sourceIds.map(function(id) { var s = self.data.sources.find(function(v) { return v.id === id; }); return s ? s.name : id; }).join(' → ') || '未选择订阅'),
+                    E('details', {}, [E('summary', {}, '覆写执行顺序'), executionList(effectiveOverrides(self.data.overrides, item.overrideIds))]),
                     actions([button('应用到路由器', async function() { var r = await call('apply', { id: item.id }); notify(r.message + (r.warnings.length ? '；' + r.warnings.join('；') : '')); await self.reload(); }, true, { disabled: item.enabled === false || !self.status.coreInstalled }),
-                        button('预览', function() { return self.preview(item); }), button('编辑', function() { self.editOutput(item); }), button('删除', function() { self.remove('outputs', item); })])]);
+                        button('预览', function() { return self.preview(item); }), button('编辑', function() { return self.editOutput(item); }), button('删除', function() { self.remove('outputs', item); })])]);
             })) : empty('创建一份可运行的输出', '选择一个或多个订阅，按需关联专属覆写。配置校验成功后才会切换运行。')]);
     },
 
-    editOutput: function(output) {
+    editOutput: async function(output) {
+        if (output) {
+            var pending = E('p', { role: 'status' }, '正在读取输出…');
+            ui.showModal('编辑输出配置', [pending, actions([button('取消', function() { ui.hideModal(); })])], 'fii-modal');
+            try { output = await this.readItem('outputs', output); }
+            catch (err) { if (pending.isConnected) { pending.textContent = err.message; pending.setAttribute('role', 'alert'); } return; }
+            if (!pending.isConnected || !document.body.classList.contains('modal-overlay-active')) return;
+        }
         var self = this, item = Object.assign({ id: 'p_' + Date.now().toString(36), name: '', enabled: true, sourceIds: [], overrideIds: [] }, output || {});
         var name = field('名称', item.name, { required: true }), enabled = toggle('启用输出', item.enabled);
-        var sources = choices(this.data.sources, item.sourceIds), overrides = choices(this.data.overrides, item.overrideIds);
+        var sources = choices(this.data.sources, item.sourceIds), overrides = choices(this.data.overrides, item.overrideIds, true);
         this.editor(output ? '编辑输出配置' : '创建输出配置', [name, enabled, E('h4', {}, '订阅源（按顺序聚合）'), sources.node,
-            E('h4', {}, '专属覆写（按顺序执行）'), overrides.node], async function() {
+            E('h4', {}, '覆写'), overrides.node], async function() {
             await self.put('outputs', Object.assign(item, { name: name.read(), enabled: enabled.read(), sourceIds: sources.read(), overrideIds: overrides.read() }));
         });
     },
 
     preview: async function(output) {
-        var self = this, result = await call('preview', { id: output.id });
+        var self = this, pending = E('p', { role: 'status', 'aria-live': 'polite' }, '正在生成预览…');
+        ui.showModal(output.name + ' · 预览', [pending, actions([button('关闭', function() { ui.hideModal(); })])], 'fii-modal');
+        var result;
+        try {
+            result = await call('preview', { id: output.id }, function(progress) {
+                pending.textContent = progress.message + (progress.total ? ' ' + Math.round(progress.received * 100 / progress.total) + '%' : '');
+            });
+        } catch (err) {
+            if (pending.isConnected && document.body.classList.contains('modal-overlay-active')) {
+                pending.textContent = err.message; pending.setAttribute('role', 'alert'); pending.className = 'fii-error';
+            }
+            return;
+        }
+        if (!pending.isConnected || !document.body.classList.contains('modal-overlay-active')) return;
         var area = field('生成的订阅 YAML', result.yaml, { area: true, code: true, rows: 20 }); area.control.readOnly = true;
         var note = E('p', { 'class': 'fii-muted' }, result.nodeCount + ' 个节点。路由器应用时统一设置监听端口、DNS、控制器与流量标记。');
-        ui.showModal(output.name + ' · 预览', [note, result.warnings.length ? E('p', { 'class': 'fii-notice' }, result.warnings.join('；')) : '', area.node,
+        var runtimeProgress = E('p', { role: 'status', 'aria-live': 'polite', 'class': 'fii-muted' }, '');
+        ui.showModal(output.name + ' · 预览', [note, E('details', {}, [E('summary', {}, '本次执行的覆写顺序'), executionList(result.appliedOverrides || [])]),
+            result.warnings.length ? E('p', { 'class': 'fii-notice' }, result.warnings.join('；')) : '', area.node, runtimeProgress,
             actions([button('下载 YAML', function() { download('fii-' + output.id + '.yaml', area.read(), 'application/yaml'); }),
-                button('查看路由器运行 YAML', async function() { var r = await call('preview', { id: output.id, runtime: true }); area.control.value = r.yaml; note.textContent = '路由器运行配置预览，包含控制器密钥，请妥善保管。'; }),
+                button('查看路由器运行 YAML', async function() {
+                    runtimeProgress.textContent = '正在生成路由器运行配置…';
+                    try {
+                        var r = await call('preview', { id: output.id, runtime: true }, function(p) { runtimeProgress.textContent = p.message; });
+                        area.control.value = r.yaml; note.textContent = '路由器运行配置预览，包含控制器密钥，请妥善保管。'; runtimeProgress.textContent = '';
+                    } catch (err) { runtimeProgress.textContent = err.message; }
+                }),
                 button('关闭', function() { ui.hideModal(); })])], 'fii-modal');
     },
 
@@ -757,8 +885,7 @@ return view.extend({
                     invalid.reportValidity(); return;
                 }
                 if (master.read() && lan.read() && !interfaces.read().length) throw new Error('请选择至少一个局域网接口');
-                var next = JSON.parse(JSON.stringify(self.data));
-                Object.assign(next.settings, { mode: !master.read() ? 'core' : mode.read() === 'redirect' ? 'redirect' : 'tproxy',
+                var settings = Object.assign({}, self.data.settings, { mode: !master.read() ? 'core' : mode.read() === 'redirect' ? 'redirect' : 'tproxy',
                     proxyEnabled: master.read(), tcpMode: mode.read(), udpMode: udpMode.read(), ipv4Proxy: ipv4.read(),
                     dnsIpv4Hijack: dns4.read(), dnsFamilyIndependent: true, fakeIpPing: ping.read(),
                     bypassChina4: china4.read(), bypassChina6: china6.read(), tcpPorts: tcpPorts.read(), udpPorts: udpPorts.read(),
@@ -769,8 +896,8 @@ return view.extend({
                     lanRules: lanAcl.read(), routerRules: routerAcl.read(),
                     dnsMode: dnsMode.read(), defaultNameservers: bootstrap.read(), proxyNameservers: nodeDns.read(), fakeIpFilter: fakeFilter.read(), localDns: localDns.read(),
                     autostart: boot.read(), autoApply: auto.read(), nameservers: servers.read(), bypass: bypass.read(), secret: secret.read(), userAgent: agent.read() });
-                Object.keys(ports).forEach(function(k) { next.settings[k] = ports[k].read(); });
-                var saved = await call('save', { data: next, revision: self.data.revision });
+                Object.keys(ports).forEach(function(k) { settings[k] = ports[k].read(); });
+                var saved = await call('save', { patch: { settings: settings }, compact: true, revision: self.data.revision });
                 self.data = saved.data;
                 if (apply) {
                     try {
@@ -795,20 +922,41 @@ return view.extend({
     importBackup: function() {
         var self = this, input = E('input', { type: 'file', accept: '.json,application/json', 'aria-label': '选择备份 JSON 文件' });
         var progress = E('p', { role: 'status', 'aria-live': 'polite', 'class': 'fii-muted' }, '');
+        var failure = E('p', { role: 'alert', 'class': 'fii-notice', style: 'white-space:pre-wrap;overflow-wrap:anywhere' }, '');
+        failure.hidden = true;
         function report(p) { progress.textContent = p.message + (p.total ? ' ' + Math.round(p.received * 100 / p.total) + '%' : ''); }
-        ui.showModal('导入备份', [E('p', {}, '选择 FII 或 SubConverter Flutter 导出的 JSON 文件。下一步会显示导入摘要。'), input, progress, actions([
+        function release(token) { return call('transfer_release', { id: token }).catch(function() {}); }
+        ui.showModal('导入备份', [E('p', {}, '选择 FII 或 SubConverter Flutter 导出的 JSON 文件。下一步会显示导入摘要。'), input, progress, failure, actions([
             button('取消', function() { ui.hideModal(); }), button('检查备份', async function() {
-                if (!input.files.length) throw new Error('请先选择文件');
-                if (input.files[0].size > 16 * 1024 * 1024) throw new Error('备份不能超过 16 MiB');
-                var raw = JSON.parse(await input.files[0].text());
-                progress.textContent = '正在检查备份…';
-                var result = await call('import_preview', { data: raw }, report), revision = self.data.revision;
-                ui.showModal('确认导入', [E('p', {}, '将替换为 ' + result.summary.sources + ' 个订阅、' + result.summary.overrides + ' 个覆写、' + result.summary.outputs + ' 个输出。'),
-                    E('p', { 'class': 'fii-notice' }, result.warnings.join('；') || '保留路由器设置与当前运行配置。'),
-                    progress, actions([button('取消', function() { ui.hideModal(); }), button('导入并替换配置库', async function() {
-                        progress.textContent = '正在导入备份…';
-                        var r = await call('import', { data: raw, revision: revision }, report); notify(r.message); await self.reload(); ui.hideModal();
-                    }, true)])]);
+                failure.hidden = true; failure.textContent = '';
+                try {
+                    if (!input.files.length) throw new Error('请先选择文件');
+                    if (input.files[0].size > 16 * 1024 * 1024) throw new Error('备份不能超过 16 MiB');
+                    var raw = JSON.parse(await input.files[0].text());
+                    progress.textContent = '正在检查备份…';
+                    var result = await call('import_preview', { data: raw, stage: true, revision: self.data.revision }, report);
+                    if (!result.importToken) throw new Error('FII 后端不支持复用检查结果，请同时升级两个安装包并强制刷新页面。');
+                    if (!input.isConnected || !document.body.classList.contains('modal-overlay-active')) {
+                        await release(result.importToken); return;
+                    }
+                    var confirmFailure = E('p', { role: 'alert', 'class': 'fii-notice', style: 'white-space:pre-wrap' }, '');
+                    confirmFailure.hidden = true;
+                    var cancel = button('取消', async function() { ui.hideModal(); await release(result.importToken); });
+                    ui.showModal('确认导入', [E('p', {}, '将替换为 ' + result.summary.sources + ' 个订阅、' + result.summary.overrides + ' 个覆写、' + result.summary.outputs + ' 个输出。'),
+                        E('p', { 'class': 'fii-notice' }, result.warnings.join('；') || '保留路由器设置与当前运行配置。'),
+                        E('p', { 'class': 'fii-muted' }, '本次检查结果保留 15 分钟，确认时无需再次上传。'),
+                        progress, confirmFailure, actions([cancel, button('导入并替换配置库', async function() {
+                            cancel.disabled = true; confirmFailure.hidden = true; progress.textContent = '正在导入已检查的备份…';
+                            try {
+                                var r = await call('import', { token: result.importToken, revision: result.revision });
+                                notify(r.message); await self.reload(); await release(result.importToken); ui.hideModal();
+                            } catch (err) {
+                                progress.textContent = ''; confirmFailure.textContent = err.message; confirmFailure.hidden = false;
+                            } finally { cancel.disabled = false; }
+                        }, true)])]);
+                } catch (err) {
+                    progress.textContent = ''; failure.textContent = err.message; failure.hidden = false;
+                }
             }, true)
         ])]);
     },

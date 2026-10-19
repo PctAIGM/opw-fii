@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fii
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=11
+PKG_RELEASE:=17
 PKG_LICENSE:=GPL-3.0-or-later
 PKGARCH:=all
 
@@ -45,7 +45,7 @@ define Package/fii/postrm
 if [ -z "$${IPKG_INSTROOT}" ]; then
 	uci -q delete firewall.fii
 	uci commit firewall
-	/etc/init.d/rpcd restart
+	/etc/init.d/rpcd reload
 fi
 exit 0
 endef

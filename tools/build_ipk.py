@@ -8,7 +8,7 @@ from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.1-11"
+VERSION = "0.1.1-17"
 EPOCH = 1792339200  # 2026-10-19 00:00 UTC, deterministic archive timestamps.
 
 
@@ -88,7 +88,7 @@ exit 0
 [ -n "$IPKG_INSTROOT" ] && exit 0
 uci -q delete firewall.fii
 uci commit firewall
-/etc/init.d/rpcd restart
+/etc/init.d/rpcd reload
 exit 0
 '''
     manifest = [build("fii", collect(ROOT / "fii/files"),
@@ -97,9 +97,9 @@ exit 0
     luci_entries = collect(ROOT / "luci-app-fii/root") + collect(ROOT / "luci-app-fii/htdocs", "www/")
     luci_postinst = b'''#!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
-rm -f /tmp/luci-indexcache
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
 rm -rf /tmp/luci-modulecache
-/etc/init.d/rpcd restart
+/etc/init.d/rpcd reload
 exit 0
 '''
     manifest.append(build("luci-app-fii", luci_entries, "fii, luci-base", controls=[("postinst", luci_postinst, 0o755)]))

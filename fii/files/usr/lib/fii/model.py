@@ -4,7 +4,7 @@ import ipaddress
 import json
 import re
 import secrets
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 MAX_TEXT = 4 * 1024 * 1024
 MAX_DOCUMENT = 16 * 1024 * 1024
@@ -44,13 +44,37 @@ def text(value, label, limit=MAX_TEXT):
     return value
 
 
+def github_token(parsed):
+    if parsed.username is None and parsed.password is None:
+        return None
+    host = (parsed.hostname or '').lower()
+    check(host == 'github.com' or host.endswith('.github.com') or
+          host == 'githubusercontent.com' or host.endswith('.githubusercontent.com'),
+          'URL 含内嵌用户名密码；目前仅支持 HTTPS GitHub 地址的 Token 认证')
+    check(parsed.scheme == 'https', 'GitHub Token 地址必须使用 HTTPS')
+    token = unquote(parsed.password if parsed.password is not None else parsed.username or '')
+    check(bool(token) and all(33 <= ord(c) <= 126 for c in token), 'GitHub Token 为空或含非法字符')
+    return token
+
+
 def url(value, optional=False):
     if not value and optional:
         return
-    parsed = urlsplit(text(value, "URL", 8192))
-    check(parsed.scheme in ("http", "https") and parsed.hostname and not parsed.username,
-          "URL 必须是 HTTP(S) 地址，不支持内嵌用户名密码")
+    value = text(value, "URL", 8192)
+    check(bool(value), "URL 为空；请填写 HTTP(S) 地址，或为本地订阅保留节点缓存")
     check(not any(c in value for c in "\r\n\x00"), "URL 含非法字符")
+    check(not any(c.isspace() for c in value), "URL 含空白字符；请去掉空格或使用 URL 编码")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        # urllib errors can include the original authority/port. Never echo
+        # secret-bearing addresses from a subscription or remote override.
+        raise ValueError("URL 的域名、IPv6 地址或端口格式无效") from None
+    check(parsed.scheme in ("http", "https"), "URL 必须以 http:// 或 https:// 开头")
+    check(bool(hostname), "URL 缺少域名或 IP 地址")
+    github_token(parsed)
 
 
 def ids(value):
@@ -71,6 +95,7 @@ def validate(data):
     check(isinstance(data, dict) and data.get("format") == "fii-backup" and data.get("version") == 1,
           "不是 FII v1 配置")
     check(type(data.get("revision")) is int and data["revision"] >= 0, "配置版本号无效")
+    url_errors = []
     for collection in ("sources", "overrides", "outputs"):
         values = data.get(collection)
         check(isinstance(values, list) and len(values) <= 500, collection + "列表无效或超过 500 项")
@@ -83,8 +108,13 @@ def validate(data):
             seen.add(ident)
             check(bool(text(item.get("name"), "名称", 256).strip()), "名称不能为空")
             check(type(item.get("enabled", True)) is bool, "enabled 必须是布尔值")
+            if collection in ("sources", "overrides"):
+                try:
+                    url(item.get("url", ""), optional=collection == "overrides" or bool(item.get("cachedYaml")))
+                except ValueError as exc:
+                    label = "订阅" if collection == "sources" else "覆写"
+                    url_errors.append('%s「%s」（ID: %s）：%s' % (label, item["name"], ident, exc))
             if collection == "sources":
-                url(item.get("url", ""), optional=bool(item.get("cachedYaml")))
                 for key in ("cachedYaml", "prefix", "includeRegex", "excludeRegex", "userAgent"):
                     text(item.get(key, ""), key)
                 for key in ("includeRegex", "excludeRegex"):
@@ -98,7 +128,6 @@ def validate(data):
             if collection == "overrides":
                 check(item.get("type") in ("YAML", "RULES", "JS"), "覆写类型必须是 YAML、RULES 或 JS")
                 text(item.get("body", ""), "覆写内容")
-                url(item.get("url", ""), optional=True)
                 check(type(item.get("global", False)) is bool, "global 必须是布尔值")
             if collection != "outputs":
                 check(type(item.get("autoRefresh", False)) is bool, "autoRefresh 必须是布尔值")
@@ -107,6 +136,11 @@ def validate(data):
             else:
                 item["sourceIds"] = ids(item.get("sourceIds", []))
                 item["overrideIds"] = ids(item.get("overrideIds", []))
+    if url_errors:
+        details = url_errors[:20]
+        if len(url_errors) > 20:
+            details.append('另有 %d 项地址错误，请修正后重新检查' % (len(url_errors) - 20))
+        raise ValueError('发现 %d 项地址错误：\n%s' % (len(url_errors), '\n'.join(details)))
     source_ids = {s["id"] for s in data["sources"]}
     override_ids = {o["id"] for o in data["overrides"]}
     for output in data["outputs"]:
@@ -209,18 +243,36 @@ def import_backup(raw, current_settings):
                 "id": str(src["id"]), "autoRefresh": src.get("autoRefreshEnabled", False),
                 "refreshMinutes": src.get("refreshIntervalMinutes", 720),
             })
-        for override in raw.get("templates", []):
+        templates = raw.get("templates", [])
+        # Flutter exports database insertion order, but displays/executes templates
+        # by sortOrder then numeric id. Old backups without sortOrder keep their
+        # supplied order so legacy association ordering is not guessed.
+        has_order = any('sortOrder' in item for item in templates)
+        if has_order:
+            check(all(type(item.get('sortOrder', 0)) is int and type(item.get('id')) is int for item in templates),
+                  '覆写排序字段无效')
+            templates = sorted(templates, key=lambda item: (item.get('sortOrder', 0), item['id']))
+        for override in templates:
             result["overrides"].append({
                 "id": str(override["id"]), "name": override["name"], "type": override.get("type", "YAML"),
                 "enabled": override.get("enabled", True), "global": override.get("global", False),
                 "url": override.get("remoteUrl", override.get("url", "")), "body": override.get("yamlBody", ""),
+                "lastRefreshAt": (override.get("lastRefreshAt") or 0) // 1000,
+                "lastError": override.get("lastError", ""),
             })
         for profile in raw.get("outputProfiles", []):
             result["outputs"].append({"id": str(profile["id"]), "name": profile["name"],
                 "enabled": profile.get("enabled", True), "sourceIds": ids(profile.get("sourceIds", "")),
                 "overrideIds": ids(profile.get("overrideIds", ""))})
+        if has_order:
+            for output in result['outputs']:
+                selected = set(output['overrideIds'])
+                output['overrideIds'] = [item['id'] for item in result['overrides'] if item['id'] in selected]
         warnings.append("仅迁移订阅、YAML/RULES/JS 覆写和输出关联；Gist、服务端口、WebDAV、统计不迁移")
     for output in result["outputs"]:
         output["sourceIds"] = [i for i in ids(output.get("sourceIds", [])) if i in {s["id"] for s in result["sources"]}]
         output["overrideIds"] = [i for i in ids(output.get("overrideIds", [])) if i in {o["id"] for o in result["overrides"]}]
+    for item in result["sources"] + result["overrides"]:
+        if isinstance(item.get("url"), str):
+            item["url"] = item["url"].strip()
     return validate(result), warnings

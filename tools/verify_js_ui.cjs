@@ -5,7 +5,7 @@ const fs=require('node:fs/promises');
 const path=require('node:path');
 (async()=>{
     const output=path.resolve(__dirname,'../build/vm');
-    const browser=await chromium.launch({channel:'chrome',headless:true});
+    const browser=await chromium.launch({channel:'chrome',headless:true,args:['--no-proxy-server']});
     const page=await browser.newPage({viewport:{width:1440,height:1050}});
     const errors=[],results=[];
     page.on('pageerror',e=>errors.push(e.message));
@@ -50,6 +50,8 @@ const path=require('node:path');
         await page.getByRole('button',{name:'覆写',exact:true}).click();
         await page.locator('.fii-card').filter({has:page.getByRole('heading',{name,exact:true})}).getByRole('button',{name:'编辑',exact:true}).click();
         await page.getByRole('textbox',{name:'覆写内容',exact:true}).fill(body);
+        assert.equal(await page.getByRole('textbox',{name:'覆写内容',exact:true}).inputValue(),body);
+        assert.deepEqual(await page.locator('.fii-editor').evaluate(form=>Array.from(form.elements).filter(x=>!x.checkValidity()).map(x=>({type:x.type,message:x.validationMessage}))),[]);
         await page.getByRole('button',{name:'保存',exact:true}).click();
     }
     const backup={format:'subconverter-backup',version:1,
@@ -57,7 +59,7 @@ const path=require('node:path');
         templates:[
             {id:1,name:'Global YAML',type:'YAML',global:true,yamlBody:'log-level: warning'},
             {id:2,name:'Global JS',type:'JS',global:true,yamlBody:'const marker=1;function main(c){c.trace=["global"];return c;}'},
-            {id:3,name:'Selected JS',type:'JS',yamlBody:'const marker=2;function main(c){c.trace.push("selected");c.rules.unshift("DOMAIN,example.com,DIRECT");return c;}'},
+            {id:3,name:'Selected JS',type:'JS',remoteUrl:'https://fii-test-token@raw.githubusercontent.com/tanwov/clash-configs/refs/heads/master/scripts/dns.js',yamlBody:'const marker=2;function main(c){c.trace.push("selected");c.rules.unshift("DOMAIN,example.com,DIRECT");return c;}'},
             {id:4,name:'Selected YAML',type:'YAML',yamlBody:'trace+: [yaml]'}],
         outputProfiles:[{id:9,name:'JS Test Output',sourceIds:'7',overrideIds:'4,2,3'}]};
     try {
@@ -78,6 +80,7 @@ const path=require('node:path');
             const data=(await rpc('get')).data;
             assert.equal(data.overrides.filter(x=>x.type==='JS').length,2);
             assert.equal(data.overrides[2].body,backup.templates[2].yamlBody);
+            assert.equal(data.overrides[2].url,backup.templates[2].remoteUrl);
             assert.deepEqual(data.settings,original.settings);
             assert.equal((await rpc('status')).appliedRevision,initial.appliedRevision);
         });
@@ -93,15 +96,19 @@ const path=require('node:path');
             await page.screenshot({path:path.join(output,'js-override-preview.png')});
             await page.getByRole('button',{name:'关闭',exact:true}).last().click();
         });
-        await check('JS editor default template and save are available',async()=>{
+        await check('JS editor accepts a GitHub token URL and saves the default script',async()=>{
             await page.getByRole('button',{name:'覆写',exact:true}).click();
             await page.getByRole('button',{name:'添加覆写',exact:true}).click();
             await page.getByRole('combobox',{name:'类型',exact:true}).selectOption('JS');
             assert.match(await page.getByRole('textbox',{name:'覆写内容',exact:true}).inputValue(),/function main\(config\)/);
             await page.getByRole('textbox',{name:'名称',exact:true}).fill('Created JS');
+            await page.locator('#modal_overlay').getByText('远程更新',{exact:true}).click();
+            const address='https://fii-test-token@raw.githubusercontent.com/tanwov/clash-configs/refs/heads/master/scripts/dns.js';
+            await page.getByRole('textbox',{name:'远程更新 URL（可选）',exact:true}).fill(address);
             await page.getByRole('button',{name:'保存',exact:true}).click();
             await waitSaved();
-            assert.equal((await rpc('get')).data.overrides.find(x=>x.name==='Created JS').type,'JS');
+            const created=(await rpc('get')).data.overrides.find(x=>x.name==='Created JS');
+            assert.equal(created.type,'JS');assert.equal(created.url,address);
         });
         await check('invalid JS syntax preserves saved revision',async()=>{
             const before=(await rpc('get')).data.revision;

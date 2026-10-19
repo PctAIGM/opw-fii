@@ -16,5 +16,5 @@ echo '* * * * * /usr/bin/fii scheduled 2>&1 | logger -t fii-refresh # fii-refres
 /etc/init.d/cron reload
 /usr/bin/fii sync-boot
 /etc/init.d/firewall reload
-/etc/init.d/rpcd restart
+/etc/init.d/rpcd reload
 exit 0

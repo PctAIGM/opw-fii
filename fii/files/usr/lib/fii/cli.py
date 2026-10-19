@@ -63,7 +63,7 @@ def run_job(method, ident, payload=None):
             from .core import install_core
             operation = install_core(payload.get("channel"), payload.get("digest"), progress)
         else:
-            operation = dispatch(method, payload)
+            operation = dispatch(method, payload, progress=progress) if method == 'preview' else dispatch(method, payload)
         result = {"done": True, "ok": True, "result": operation}
     except Exception as exc:
         result = {"done": True, "ok": False, "error": str(exc)[:3000]}
@@ -72,14 +72,81 @@ def run_job(method, ident, payload=None):
     write_json(path, result)
 
 
-def validate_contents(data):
+def validate_contents(data, previous=None):
     validate(data)
+    check(not any('contentOmitted' in item for kind in ('sources', 'overrides') for item in data[kind]),
+          '不能把列表摘要当作完整配置保存，请重新载入完整内容')
+    sources = {item['id']: item for item in previous['sources']} if previous else {}
+    overrides = {item['id']: item for item in previous['overrides']} if previous else {}
     for source in data["sources"]:
         if source.get("cachedYaml"):
-            source["nodeCount"] = len(extract(source["cachedYaml"]))
+            old = sources.get(source['id'], {})
+            if old.get('cachedYaml') == source['cachedYaml'] and type(old.get('nodeCount')) is int:
+                source['nodeCount'] = old['nodeCount']
+            else:
+                source["nodeCount"] = len(extract(source["cachedYaml"]))
+        else:
+            source.pop('nodeCount', None)
     for override in data["overrides"]:
-        validate_override(override)
+        old = overrides.get(override['id'])
+        if old is None or (old.get('type'), old.get('body', '')) != (override['type'], override.get('body', '')):
+            validate_override(override)
     return data
+
+
+def view_data(data):
+    """Metadata for ordinary views; editor contents are fetched individually."""
+    result = {key: value for key, value in data.items() if key not in ('sources', 'overrides')}
+    result['sources'] = [{**{k: v for k, v in item.items() if k != 'cachedYaml'}, 'contentOmitted': True}
+                         for item in data['sources']]
+    result['overrides'] = [{**{k: v for k, v in item.items() if k != 'body'},
+                            'snippet': item.get('body', '')[:240], 'contentOmitted': True}
+                           for item in data['overrides']]
+    return result
+
+
+def apply_patch(data, patch):
+    check(isinstance(patch, dict), '配置变更必须是对象')
+    result = copy.deepcopy(data)
+    if set(patch) == {'settings'}:
+        check(isinstance(patch['settings'], dict), '设置无效')
+        result['settings'].update(patch['settings'])
+        return result
+    kind = patch.get('kind')
+    check(kind in ('sources', 'overrides', 'outputs'), '配置分类无效')
+    if set(patch) == {'kind', 'order'}:
+        order = patch['order']
+        current = {item['id']: item for item in result[kind]}
+        check(isinstance(order, list) and all(isinstance(ident, str) for ident in order)
+              and len(order) == len(current) and len(set(order)) == len(order) and set(order) == set(current),
+              '排序必须包含每个配置项且不能重复')
+        result[kind] = [current[ident] for ident in order]
+    elif set(patch) == {'kind', 'item'}:
+        item = patch['item']
+        check(isinstance(item, dict) and isinstance(item.get('id'), str), '配置项无效')
+        check(not any(key in item for key in ('contentOmitted', 'snippet')), '请先读取完整配置项后再保存')
+        index = next((i for i, old in enumerate(result[kind]) if old['id'] == item['id']), None)
+        if index is None:
+            result[kind].append(copy.deepcopy(item))
+        else:
+            result[kind][index] = copy.deepcopy(item)
+    elif set(patch) == {'kind', 'remove'}:
+        ident = patch['remove']
+        check(isinstance(ident, str), '配置 ID 无效')
+        result[kind] = [item for item in result[kind] if item['id'] != ident]
+        key = {'sources': 'sourceIds', 'overrides': 'overrideIds'}.get(kind)
+        if key:
+            for output in result['outputs']:
+                output[key] = [value for value in output.get(key, []) if value != ident]
+    elif set(patch) == {'kind', 'id', 'fields'}:
+        fields = patch['fields']
+        check(isinstance(fields, dict) and not set(fields) & {'id', 'contentOmitted', 'snippet'}, '配置变更字段无效')
+        item = next((item for item in result[kind] if item['id'] == patch['id']), None)
+        check(item is not None, '配置项不存在')
+        item.update(copy.deepcopy(fields))
+    else:
+        raise ValueError('配置变更字段无效')
+    return result
 
 
 def refresh_one(kind, ident):
@@ -125,7 +192,7 @@ def scheduled():
             activate(bundle["outputId"])
 
 
-def dispatch(method, payload=None):
+def dispatch(method, payload=None, progress=None):
     payload = payload or {}
     check(isinstance(payload, dict), "请求参数必须是对象")
     if method.startswith('transfer_'):
@@ -183,6 +250,10 @@ def dispatch(method, payload=None):
         return refresh_one(payload.get("kind", "sources"), str(payload.get("id", "")))
     if method == "apply":
         return activate(str(payload.get("id", "")))
+    if method == 'import' and 'token' in payload:
+        check(set(payload) == {'token', 'revision'}, '导入确认只接受检查凭证与配置版本')
+        from .imports import confirm
+        return confirm(payload['token'], payload['revision'])
     if method == "service":
         action = payload.get("action")
         check(action in ("start", "stop", "restart"), "服务操作无效")
@@ -199,34 +270,59 @@ def dispatch(method, payload=None):
     with lock():
         store = Store()
         data = store.read()
-        if method in ("get", "export"):
-            return {"data": data, "version": __version__}
-        if method == "preview":
-            result = render(data, str(payload.get("id", "")))
-            if payload.get("runtime"):
-                from .runtime import overlay
-                result["yaml"] = overlay(result["yaml"], data["settings"])
+    if method in ("get", "export"):
+        if method == 'get' and 'kind' in payload:
+            kind = payload.get('kind')
+            check(kind in ('sources', 'overrides', 'outputs'), '配置分类无效')
+            item = next((item for item in data[kind] if item['id'] == payload.get('id')), None)
+            check(item is not None, '配置项不存在')
+            if payload.get('metadataOnly') and kind in ('sources', 'overrides'):
+                item = next(value for value in view_data(data)[kind] if value['id'] == item['id'])
+            result = {'item': item, 'revision': data['revision']}
+            if payload.get('sync'):
+                result['data'] = view_data(data)
             return result
-        if method == "nodes":
-            source = next((s for s in data["sources"] if s["id"] == str(payload.get("id", ""))), None)
-            check(source is not None and source.get("cachedYaml"), "暂无缓存，请先刷新订阅")
-            nodes = extract(source["cachedYaml"])
-            nodes = [p for p in nodes if
-                     (not source.get("includeRegex") or re.search(source["includeRegex"], p["name"])) and
-                     (not source.get("excludeRegex") or not re.search(source["excludeRegex"], p["name"]))]
-            return {"nodes": [{"name": source.get("prefix", "") + p["name"], "type": p.get("type", ""),
-                               "server": p.get("server", "")} for p in nodes]}
-        if method == "save":
-            new_data = validate_contents(copy.deepcopy(payload.get("data")))
+        return {"data": view_data(data) if method == 'get' and payload.get('compact') else data, "version": __version__}
+    if method == "preview":
+        result = render(data, str(payload.get("id", "")), progress=progress)
+        if payload.get("runtime"):
+            from .runtime import overlay
+            result["yaml"] = overlay(result["yaml"], data["settings"])
+        return result
+    if method == "nodes":
+        source = next((s for s in data["sources"] if s["id"] == str(payload.get("id", ""))), None)
+        check(source is not None and source.get("cachedYaml"), "暂无缓存，请先刷新订阅")
+        nodes = extract(source["cachedYaml"])
+        nodes = [p for p in nodes if
+                 (not source.get("includeRegex") or re.search(source["includeRegex"], p["name"])) and
+                 (not source.get("excludeRegex") or not re.search(source["excludeRegex"], p["name"]))]
+        return {"nodes": [{"name": source.get("prefix", "") + p["name"], "type": p.get("type", ""),
+                           "server": p.get("server", "")} for p in nodes]}
+    if method == "save":
+        check(type(payload.get('revision')) is int and payload['revision'] == data['revision'],
+              '配置已被其他操作更新；请重新载入页面后再保存')
+        check(not ('patch' in payload and 'data' in payload), '不能同时提交完整配置与配置变更')
+        new_data = apply_patch(data, payload['patch']) if 'patch' in payload else copy.deepcopy(payload.get('data'))
+        validate_contents(new_data, data)
+        with lock():
             store.save(new_data, payload.get("revision"))
-            return {"data": new_data, "message": "已保存；运行配置需在输出页点击应用"}
-        if method in ("import", "import_preview"):
-            imported, warnings = import_backup(payload.get("data"), data["settings"])
-            validate_contents(imported)
-            if method == "import":
+        return {"data": view_data(new_data) if payload.get('compact') else new_data, "message": "已保存；运行配置需在输出页点击应用"}
+    if method in ("import", "import_preview"):
+        if method == 'import_preview' and payload.get('stage'):
+            check(type(payload.get('revision')) is int and payload['revision'] == data['revision'],
+                  '配置已变化，请重新载入后再检查备份')
+        imported, warnings = import_backup(payload.get("data"), data["settings"])
+        validate_contents(imported)
+        if method == "import":
+            with lock():
                 store.save(imported, payload.get("revision"))
-            return {"summary": {key: len(imported[key]) for key in ('sources', 'overrides', 'outputs')}, "warnings": warnings,
-                    "message": "备份已导入，运行配置保持当前版本，请在输出页预览后应用"}
+        summary = {key: len(imported[key]) for key in ('sources', 'overrides', 'outputs')}
+        result = {"summary": summary, "warnings": warnings,
+                  "message": "备份已导入，运行配置保持当前版本，请在输出页预览后应用"}
+        if method == 'import_preview' and payload.get('stage'):
+            from .imports import stage
+            result.update(stage(imported, data['revision'], summary, warnings))
+        return result
     raise ValueError("未知操作")
 
 

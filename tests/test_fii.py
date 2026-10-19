@@ -293,6 +293,64 @@ class PersistenceTests(unittest.TestCase):
 
 
 class BackupTests(unittest.TestCase):
+    def test_url_errors_identify_all_items_and_reasons_without_addresses(self):
+        raw = {"format": "subconverter-backup", "version": 1,
+               "sources": [{"id": 7, "name": "缺少协议", "url": "example.com/private-token"},
+                           {"id": 8, "name": "认证订阅", "url": "https://user:private-password@example.com/sub"},
+                           {"id": 9, "name": "空订阅", "url": ""}],
+               "templates": [{"id": 2, "name": "远程脚本", "type": "JS", "remoteUrl": "https:///private-token", "yamlBody": ""}],
+               "outputProfiles": []}
+        original = copy.deepcopy(raw)
+        with self.assertRaises(ValueError) as caught:
+            model.import_backup(raw, model.defaults()['settings'])
+        message = str(caught.exception)
+        for fragment in ('4 项地址错误', '订阅「缺少协议」（ID: 7）', 'http:// 或 https://',
+                         '订阅「认证订阅」（ID: 8）', '内嵌用户名密码', '订阅「空订阅」（ID: 9）',
+                         'URL 为空', '覆写「远程脚本」（ID: 2）', '缺少域名'):
+            self.assertIn(fragment, message)
+        for secret in ('private-token', 'private-password', 'example.com'):
+            self.assertNotIn(secret, message)
+        self.assertEqual(raw, original)
+
+    def test_url_parser_errors_do_not_leak_addresses_and_credentials_are_detected(self):
+        for address, reason in (
+                ('https://[private-token/sub', '格式无效'),
+                ('https://example.com:private-token/sub', '格式无效'),
+                ('https://example.com:65536/sub', '格式无效'),
+                ('https://:private-token@example.com/sub', '内嵌用户名密码'),
+                ('https://example.com/private token', '空白'),
+                ('https://example.com/\nprivate-token', '非法字符')):
+            with self.subTest(address=address), self.assertRaises(ValueError) as caught:
+                model.url(address)
+            self.assertIn(reason, str(caught.exception))
+            self.assertNotIn('private', str(caught.exception))
+        model.url('https://[::1]:8080/sub?token=test')
+
+    def test_import_trims_url_edges_and_retains_local_cached_sources(self):
+        raw = {"format": "subconverter-backup", "version": 1,
+               "sources": [{"id": 7, "name": "远程", "url": " \nhttps://example.com/sub?token=test\t ", "cachedYaml": YAML},
+                           {"id": 8, "name": "本地", "url": "  ", "cachedYaml": YAML}],
+               "templates": [{"id": 2, "name": "远程覆写", "type": "YAML", "remoteUrl": " https://example.com/rules ", "yamlBody": "rules+: []"}],
+               "outputProfiles": []}
+        data, _ = model.import_backup(raw, model.defaults()['settings'])
+        self.assertEqual(data['sources'][0]['url'], 'https://example.com/sub?token=test')
+        self.assertEqual(data['sources'][1]['url'], '')
+        self.assertEqual(data['sources'][1]['cachedYaml'], YAML)
+        self.assertEqual(data['overrides'][0]['url'], 'https://example.com/rules')
+
+    def test_url_import_failure_keeps_saved_state_and_active_snapshot(self):
+        with TestDirectory() as tmp, patch.dict(os.environ, {'FII_ROOT': tmp}):
+            original = Store().read()
+            snapshot = {'outputId': 'old', 'yaml': 'old'}
+            write_json(rooted('/etc/fii/active.json'), snapshot)
+            raw = {'format': 'subconverter-backup', 'version': 1,
+                   'sources': [{'id': 7, 'name': '坏地址', 'url': 'not-http'}], 'templates': [], 'outputProfiles': []}
+            for method in ('import_preview', 'import'):
+                with self.subTest(method=method), self.assertRaisesRegex(ValueError, '订阅「坏地址」'):
+                    cli.dispatch(method, {'data': raw, 'revision': original['revision']})
+                self.assertEqual(Store().read(), original)
+                self.assertEqual(runtime.active(), snapshot)
+
     def test_subconverter_import_preserves_order_and_router_settings(self):
         raw = {"format": "subconverter-backup", "version": 1,
                "sources": [{"id": 7, "name": "Airport", "url": "https://example.com", "cachedYaml": YAML}],
