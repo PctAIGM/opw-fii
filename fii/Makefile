@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fii
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=8
+PKG_RELEASE:=11
 PKG_LICENSE:=GPL-3.0-or-later
 PKGARCH:=all
 
@@ -12,7 +12,7 @@ define Package/fii
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Simple Mihomo configuration manager for OpenWrt
-  DEPENDS:=+python3 +python3-yaml +ca-bundle +firewall4 +ip-full +kmod-nft-tproxy +kmod-nft-socket +kmod-tun +kmod-dummy
+  DEPENDS:=+python3 +python3-yaml +node +ca-bundle +firewall4 +ip-full +kmod-nft-tproxy +kmod-nft-socket +kmod-tun +kmod-dummy
 endef
 
 define Package/fii/description

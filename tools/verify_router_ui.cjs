@@ -11,6 +11,7 @@ const path = require('node:path');
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
+    page.on('requestfailed', request => errors.push({url:request.url(), error:request.failure().errorText}));
     const results = [];
     let original, initialStatus;
     async function screenshot(name) {
@@ -20,9 +21,23 @@ const path = require('node:path');
     async function rpc(method, payload = {}) {
         const response = await page.evaluate(async ({method, payload}) => {
             const r = await L.require('rpc');
-            const result = await r.declare({object:'luci.fii',method,params:['payload'],expect:{'':{}}})(JSON.stringify(payload));
-            if (!result.ok) throw new Error(result.error);
-            return result.result;
+            async function invoke(name,data) {
+                let result = await r.declare({object:'luci.fii',method:name,params:['payload'],expect:{'':{}},nobatch:true})(JSON.stringify(data));
+                if (!result.ok) throw new Error(result.error);
+                if (result.responseTransfer) {
+                    const t=result.responseTransfer, bytes=new Uint8Array(t.size);
+                    let offset=0;
+                    while(offset<t.size) {
+                        const part=await invoke('transfer_read',{id:t.id,offset});
+                        const chunk=Uint8Array.from(atob(part.data),c=>c.charCodeAt(0));
+                        bytes.set(chunk,offset);offset+=chunk.length;
+                    }
+                    await invoke('transfer_release',{id:t.id});
+                    result=JSON.parse(new TextDecoder().decode(bytes));
+                }
+                return result.result;
+            }
+            return invoke(method,payload);
         }, {method, payload});
         if (response.jobId) {
             for (let attempt=0; attempt<180; attempt++) {
@@ -165,6 +180,7 @@ const path = require('node:path');
         assert.deepEqual(errors, []);
         results.push({name:'no JavaScript page errors',passed:true});
     } catch (error) {
+        console.log('Browser errors:', JSON.stringify(errors));
         console.log(await page.locator('body').innerText());
         await page.screenshot({path:path.join(output,'router-settings-ui-failure.png')});
         throw error;

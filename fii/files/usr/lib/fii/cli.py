@@ -14,9 +14,10 @@ from .render import extract, render, validate_override
 from .runtime import INIT, activate, active, prepare, ready, run, status
 from .store import Store, lock, rooted, write_json
 
-READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "core_info", "core_check", "network")
-WRITE_METHODS = ("save", "refresh", "apply", "service", "import", "import_preview", "select", "core_update", "core_channel")
-LONG_METHODS = ("refresh", "apply", "service", "core_update", "core_check")
+READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "core_info", "core_check", "network", "transfer_read")
+WRITE_METHODS = ("save", "refresh", "apply", "service", "import", "import_preview", "select", "core_update", "core_channel",
+                 "transfer_begin", "transfer_append", "transfer_invoke", "transfer_release")
+LONG_METHODS = ("refresh", "apply", "service", "core_update", "core_check", "import", "import_preview", "save", "preview")
 
 
 def job_path(ident):
@@ -31,17 +32,20 @@ def queue_job(method, payload):
     for old in path.parent.glob("*.json"):
         if re.fullmatch(r"[a-f0-9]{32}.json", old.name) and time.time() - old.stat().st_mtime > 86400:
             old.unlink(missing_ok=True)
+            old.with_suffix('.payload').unlink(missing_ok=True)
     try:
-        subprocess.Popen([sys.executable, "/usr/bin/fii", "job-run", method, ident, json.dumps(payload)],
+        write_json(path.with_suffix('.payload'), payload)
+        subprocess.Popen([sys.executable, "/usr/bin/fii", "job-run", method, ident],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True, close_fds=True)
     except OSError:
         path.unlink(missing_ok=True)
+        path.with_suffix('.payload').unlink(missing_ok=True)
         raise ValueError("无法启动后台任务") from None
     return {"jobId": ident}
 
 
-def run_job(method, ident, payload):
+def run_job(method, ident, payload=None):
     check(method in LONG_METHODS, "任务操作无效")
     path = job_path(ident)
     started, last_report = int(time.time()), 0
@@ -53,6 +57,8 @@ def run_job(method, ident, payload):
                          "progress": {"message": message, "received": received, "total": total}})
         last_report = time.monotonic()
     try:
+        if payload is None:
+            payload = json.loads(path.with_suffix('.payload').read_text(encoding='utf-8'))
         if method == "core_update":
             from .core import install_core
             operation = install_core(payload.get("channel"), payload.get("digest"), progress)
@@ -61,6 +67,8 @@ def run_job(method, ident, payload):
         result = {"done": True, "ok": True, "result": operation}
     except Exception as exc:
         result = {"done": True, "ok": False, "error": str(exc)[:3000]}
+    finally:
+        path.with_suffix('.payload').unlink(missing_ok=True)
     write_json(path, result)
 
 
@@ -120,6 +128,23 @@ def scheduled():
 def dispatch(method, payload=None):
     payload = payload or {}
     check(isinstance(payload, dict), "请求参数必须是对象")
+    if method.startswith('transfer_'):
+        from . import transport
+        if method == 'transfer_begin':
+            return transport.begin(payload.get('size'))
+        if method == 'transfer_append':
+            return transport.append(payload.get('id'), payload.get('offset'), payload.get('data'))
+        if method == 'transfer_read':
+            return transport.read(payload.get('id'), payload.get('offset'), payload.get('size', transport.CHUNK))
+        if method == 'transfer_release':
+            return transport.release(payload.get('id'))
+        if method == 'transfer_invoke':
+            operation = payload.get('method')
+            # This write-only entry point cannot bypass read/write ACLs or recurse.
+            check(operation in READ_METHODS + WRITE_METHODS and not operation.startswith('transfer_'), '传输操作无效')
+            request = transport.consume(payload.get('id'))
+            check(isinstance(request, dict), '请求参数必须是对象')
+            return queue_job(operation, request) if operation in LONG_METHODS else dispatch(operation, request)
     if method == "job":
         path = job_path(payload.get("id"))
         check(path.exists(), "任务记录不存在，可能路由器已重启")
@@ -200,7 +225,7 @@ def dispatch(method, payload=None):
             validate_contents(imported)
             if method == "import":
                 store.save(imported, payload.get("revision"))
-            return {"data": imported, "warnings": warnings,
+            return {"summary": {key: len(imported[key]) for key in ('sources', 'overrides', 'outputs')}, "warnings": warnings,
                     "message": "备份已导入，运行配置保持当前版本，请在输出页预览后应用"}
     raise ValueError("未知操作")
 
@@ -229,7 +254,10 @@ def main():
             check(len(raw) <= MAX_DOCUMENT, "请求过大")
             payload = rpc_payload(raw)
             result = queue_job(method, payload) if method in LONG_METHODS else dispatch(method, payload)
-            print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+            from .transport import response
+            print(response(result, chunk_reply=method == 'transfer_read'))
+        elif len(args) == 3 and args[0] == "job-run":
+            run_job(args[1], args[2])
         elif len(args) == 4 and args[0] == "job-run":
             run_job(args[1], args[2], json.loads(args[3]))
         elif args == ["prepare"]:

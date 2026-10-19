@@ -12,7 +12,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fii/files/usr/lib"))
 os.environ["FII_ROOT"] = str(ROOT / "build/preview-root")
-from fii.cli import dispatch
+from fii.cli import dispatch, READ_METHODS, WRITE_METHODS
 from fii.core import read_json, CHANNEL_PATH
 
 STATUS = {"running": False, "coreInstalled": False, "coreVersion": "",
@@ -48,6 +48,12 @@ class Handler(SimpleHTTPRequestHandler):
                 raise ValueError("请求超过 16 MiB")
             request = json.loads(self.rfile.read(size))
             method, payload = request["method"], request.get("payload", {})
+            if method == 'transfer_invoke':
+                from fii.transport import consume
+                method = payload.get('method')
+                if method not in READ_METHODS + WRITE_METHODS or method.startswith('transfer_'):
+                    raise ValueError('传输操作无效')
+                payload = consume(payload.get('id'))
             if method == "status":
                 result = {**STATUS, "coreSelectedChannel": read_json(CHANNEL_PATH).get("channel", "release")}
             elif method == "core_info":

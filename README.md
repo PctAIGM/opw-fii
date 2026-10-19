@@ -10,7 +10,7 @@ FII 面向 **OpenWrt 24.10.8 / x86_64（Intel J4125）**，把日常配置整理
 
 配置管理方式参考本地 `sub-converter-flutter`；OpenWrt 服务生命周期、配置测试、防火墙重载和清理机制参考 [OpenWrt-nikki](https://github.com/nikkinikki-org/OpenWrt-nikki)。FII 使用独立的配置目录、rpcd 接口和 nftables 表。
 
-当前为 **0.1.1-8 试用包**。应用安装包不包含内核，也不依赖内核软件包；安装后在 LuCI 下载或更新 Release / Alpha 内核。已在 iStoreOS 24.10.8（QEMU/x86_64）完成真实安装和运行验证，并在隔离客户端与服务器之间完成实际网络检查，覆盖路由器本机与 LAN 的 TCP、UDP、DNS、IPv6、访问控制及防火墙重载。实体设备性能、真实交换网络和重启自启仍需单独验收。本机没有 Linux OpenWrt SDK，IPK 通过随附工具构建并检查包结构，SDK Makefile 留作标准 feed 构建入口。实测记录见 docs/VALIDATION.md。
+当前为 **0.1.1-11 试用包**。应用安装包不包含内核，也不依赖内核软件包；安装后在 LuCI 下载或更新 Release / Alpha 内核。已在 iStoreOS 24.10.8（QEMU/x86_64）完成真实安装和运行验证，并在隔离客户端与服务器之间完成实际网络检查，覆盖路由器本机与 LAN 的 TCP、UDP、DNS、IPv6、访问控制及防火墙重载。实体设备性能、真实交换网络和重启自启仍需单独验收。本机没有 Linux OpenWrt SDK，IPK 通过随附工具构建并检查包结构，SDK Makefile 留作标准 feed 构建入口。实测记录见 docs/VALIDATION.md。
 
 ## 功能
 
@@ -18,7 +18,7 @@ FII 面向 **OpenWrt 24.10.8 / x86_64（Intel J4125）**，把日常配置整理
 | --- | --- |
 | 概览 | Release / Alpha 内核下载与更新、版本、运行状态、启停、日志、代理组节点切换 |
 | 订阅源 | URL / 本地 YAML / 常见分享链接、前缀、保留/排除正则、节点预览、流量和到期时间、自动刷新 |
-| 覆写 | YAML / RULES、本地编辑 / 远程更新、全局覆写 |
+| 覆写 | YAML / RULES / JS、本地编辑 / 远程更新、全局覆写 |
 | 输出配置 | 多订阅聚合、有序选择覆写、预览和下载、应用为路由器配置 |
 | 路由器设置 | TCP / UDP 独立模式与 TUN、LAN / 本机有序访问规则、IPv4 / IPv6 与 DNS 独立接管、大陆地址 / DSCP / FWMark / 端口绕过、保留网段、DNS、运行参数、备份迁移、保存并应用 |
 
@@ -35,8 +35,8 @@ FII 面向 **OpenWrt 24.10.8 / x86_64（Intel J4125）**，把日常配置整理
 
 | 文件 | 用途 |
 | --- | --- |
-| `fii_0.1.1-8_all.ipk` | 配置管理、内核下载器、rpcd、procd、DNS 与透明代理 |
-| `luci-app-fii_0.1.1-8_all.ipk` | LuCI 管理页面，中文界面 |
+| `fii_0.1.1-11_all.ipk` | 配置管理、内核下载器、rpcd、procd、DNS 与透明代理 |
+| `luci-app-fii_0.1.1-11_all.ipk` | LuCI 管理页面，中文界面 |
 | `SHA256SUMS` / `manifest.json` | 文件校验值及包信息 |
 
 先停止 Nikki、OpenClash 等已有透明代理的接管，避免监听端口和策略路由冲突。FII 下载的内核使用自己的 `/etc/fii/bin/mihomo` 路径，不覆盖其他插件或软件包的 `/usr/bin/mihomo`。
@@ -45,10 +45,10 @@ FII 面向 **OpenWrt 24.10.8 / x86_64（Intel J4125）**，把日常配置整理
 
 ```sh
 opkg update
-opkg install /tmp/fii_0.1.1-8_all.ipk /tmp/luci-app-fii_0.1.1-8_all.ipk
+opkg install /tmp/fii_0.1.1-11_all.ipk /tmp/luci-app-fii_0.1.1-11_all.ipk
 ```
 
-依赖由已配置的 OpenWrt 软件源安装：`python3`、`python3-yaml`、`ca-bundle`、`firewall4`、`ip-full`、`kmod-nft-tproxy`、`kmod-nft-socket`、`kmod-tun`、`kmod-dummy`、`luci-base`。内核模块必须与实际固件内核版本匹配，安装错误应先修复固件软件源，不要强制忽略依赖。
+依赖由已配置的 OpenWrt 软件源安装：`python3`、`python3-yaml`、`node`、`ca-bundle`、`firewall4`、`ip-full`、`kmod-nft-tproxy`、`kmod-nft-socket`、`kmod-tun`、`kmod-dummy`、`luci-base`。内核模块必须与实际固件内核版本匹配，安装错误应先修复固件软件源，不要强制忽略依赖。
 
 安装后刷新 LuCI，打开 **服务 → FII**。默认不启用开机启动，也不会自动应用订阅。
 
@@ -78,6 +78,10 @@ opkg install /tmp/fii_0.1.1-8_all.ipk /tmp/luci-app-fii_0.1.1-8_all.ipk
 | 备份与迁移 | FII / SubConverter Flutter 备份导入与导出 |
 
 访问规则从上到下匹配，**第一条命中决定行为**；一条规则内任一条件匹配即可命中，条件为空时匹配全部。未命中任何规则的流量维持原路径。可用“直连流量、接管 DNS”或“代理流量、保留原 DNS”等组合。旧版设备范围与系统用户绕过在页面保存时转换成等价规则。
+
+备份导入支持不超过 16 MiB 的 FII / SubConverter Flutter JSON 文件。检查和导入采用分块传输与后台任务，页面显示传输进度；检查通过后再确认替换配置库。大配置的读取、保存与备份导出也使用分块传输，避免超过 LuCI RPC 的消息大小限制。导入保留当前路由器设置和已应用的运行快照；格式错误或检查失败时不修改配置库。
+
+不同固件或反向代理的消息上限不同时，传输会在失败后自动缩小分块，最低到 1 KiB，再重试当前块；回包也采用同样的调整方式。上传重试会核对已收到的字节，避免回执丢失后重复追加。前后端传输协议不匹配时会提示同时升级两个包；仍无法传输时会显示失败的操作和参数大小。
 
 TUN 支持与 REDIRECT、TPROXY 混用。FII 管理独立策略路由，不开启 Mihomo 的全局自动路由。核心出站标记绕过所有接管规则；停止服务会清理 TPROXY / TUN 路由、nft 表和 FII 的 IPv6 Fake-IP 虚拟接口。使用 TUN 需要固件匹配的 `kmod-tun`，IPv6 Fake-IP 路由需要 `kmod-dummy`。
 
@@ -118,6 +122,19 @@ proxy-groups!:
 
 普通对象递归合并，普通列表替换；`{{proxy_names}}` 展开为筛选、重命名和去重后的节点名称列表。RULES 覆写每行一条规则，跳过空行和 `#` 注释，插入到当时的 `rules` 开头；多个 RULES 覆写中后执行的规则在更前面。
 
+JS 覆写兼容 SubConverter Flutter 的同步入口 `main(config)`，接收当时的完整配置对象，返回修改后的对象。YAML、RULES、JS 按上述顺序逐项执行，可以交错排列；每个 JS 都有独立上下文，不继承前一个脚本的全局变量。可参考 `examples/override.js`：
+
+```js
+function main(config) {
+  config.rules.unshift('DOMAIN,example.com,DIRECT');
+  return config;
+}
+```
+
+保存、导入和远程刷新时校验 JS 语法与 `main` 入口；预览和应用时才调用 `main(config)`。语法错误、执行异常、非法返回值或超时会中止当前操作，保留已保存的有效脚本或当前运行配置。JS 需要 `node` 依赖；只在校验和生成时启动子进程，Linux 路由器上以 UID/GID 65534 运行，不常驻。
+
+执行环境不注入 `require`、`process`、文件、网络或定时器 API，禁用动态代码生成；不支持 async/Promise 返回。单阶段执行上限 2 秒，子进程总等待上限 6 秒，V8 旧生代堆上限 128 MiB，配置输入/输出上限 8 MiB。上下文隔离和进程限制不等同于独立的安全沙箱；Node 官方也明确说明 [vm 不应作为安全机制](https://nodejs.org/download/release/latest-v21.x/docs/api/vm.html)。
+
 运行时最后统一设置监听、控制器、DNS 和流量标记，因此路由器集成字段不会因覆写导致防火墙与核心配置不一致。通用输出预览和“路由器运行 YAML”预览都可下载，后者含控制器密钥。
 
 ## 透明代理边界
@@ -133,13 +150,13 @@ proxy-groups!:
 - LAN 防火墙区域需允许访问路由器 DNS 端口；标准 LAN 区域满足这一点。自定义 guest/隔离区域需要结合自己的区域策略验证。
 - `仅内核` 模式只提供本机监听，不接管 LAN。
 
-当前尚未提供网页订阅发布、JS 覆写、WebDAV/Gist 同步、二维码、节点预解析或内置 Zashboard。支持常见 SS / VMess / VLESS / Trojan / Hysteria2 分享链接及 Base64 订阅；不支持的协议或传输明确报错，可先转换成完整 Mihomo YAML 再导入。
+当前尚未提供网页订阅发布、WebDAV/Gist 同步、二维码、节点预解析或内置 Zashboard。支持常见 SS / VMess / VLESS / Trojan / Hysteria2 分享链接及 Base64 订阅；不支持的协议或传输明确报错，可先转换成完整 Mihomo YAML 再导入。
 
 ## 从 SubConverter Flutter 迁移
 
 在 SubConverter Flutter 导出完整 JSON 备份，在 FII 的“路由器设置 → 导入备份”选择文件。FII 先检查并显示摘要，再执行替换；支持 `subconverter-backup` v1。
 
-迁移订阅、缓存、流量信息、YAML/RULES 覆写、远程覆写 URL 和输出关联；保留路由器当前端口、密钥、接管设置与运行快照。JS 覆写会导致整次导入报错，原数据保留，不会静默跳过脚本。可先在 SubConverter 中移除/改写 JS，或把已经生成的完整 YAML 作为订阅源导入。自定义订阅 DNS / 节点预解析等未支持设置会在导入摘要中提示。
+迁移订阅、缓存、流量信息、YAML/RULES/JS 覆写、远程覆写 URL 和输出关联；保留路由器当前端口、密钥、接管设置与运行快照。JS 原文、类型和关联顺序保留；脚本校验失败时整次导入失败并保留原数据。自定义订阅 DNS / 节点预解析等未支持设置会在导入摘要中提示。
 
 FII 自身的备份导入同样保留当前路由器设置，适合迁移配置内容。完整灾备应另外保管 `/etc/fii/`；备份包含订阅凭证和节点密码。
 

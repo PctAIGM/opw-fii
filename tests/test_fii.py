@@ -306,11 +306,12 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(warnings)
         self.assertEqual(render.render(data, "9")["nodeCount"], 2)
 
-    def test_js_import_rejected_instead_of_silently_dropping_behavior(self):
+    def test_js_import_preserves_script_and_type(self):
         raw = {"format": "subconverter-backup", "version": 1, "sources": [], "outputProfiles": [],
                "templates": [{"id": 1, "name": "JS", "type": "JS", "yamlBody": "function main(c){return c}"}]}
-        with self.assertRaisesRegex(ValueError, "JS"):
-            model.import_backup(raw, model.defaults()["settings"])
+        data, _ = model.import_backup(raw, model.defaults()["settings"])
+        self.assertEqual(data['overrides'][0]['type'], 'JS')
+        self.assertEqual(data['overrides'][0]['body'], 'function main(c){return c}')
 
     def test_fii_import_cannot_turn_on_autostart_or_change_credentials(self):
         original = model.defaults()["settings"]

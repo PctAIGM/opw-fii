@@ -96,7 +96,7 @@ def validate(data):
                 for key in ("uploadBytes", "downloadBytes", "totalBytes", "expireAtSeconds"):
                     check(item.get(key) is None or (type(item[key]) is int and item[key] >= 0), "流量/时间字段无效")
             if collection == "overrides":
-                check(item.get("type") in ("YAML", "RULES"), "覆写支持 YAML / RULES；JS 脚本请先转换为完整 YAML 配置")
+                check(item.get("type") in ("YAML", "RULES", "JS"), "覆写类型必须是 YAML、RULES 或 JS")
                 text(item.get("body", ""), "覆写内容")
                 url(item.get("url", ""), optional=True)
                 check(type(item.get("global", False)) is bool, "global 必须是布尔值")
@@ -219,7 +219,7 @@ def import_backup(raw, current_settings):
             result["outputs"].append({"id": str(profile["id"]), "name": profile["name"],
                 "enabled": profile.get("enabled", True), "sourceIds": ids(profile.get("sourceIds", "")),
                 "overrideIds": ids(profile.get("overrideIds", ""))})
-        warnings.append("仅迁移订阅、YAML/RULES 覆写和输出关联；Gist、服务端口、WebDAV、统计不迁移")
+        warnings.append("仅迁移订阅、YAML/RULES/JS 覆写和输出关联；Gist、服务端口、WebDAV、统计不迁移")
     for output in result["outputs"]:
         output["sourceIds"] = [i for i in ids(output.get("sourceIds", [])) if i in {s["id"] for s in result["sources"]}]
         output["overrideIds"] = [i for i in ids(output.get("overrideIds", [])) if i in {o["id"] for o in result["overrides"]}]

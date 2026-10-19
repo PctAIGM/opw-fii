@@ -184,7 +184,13 @@ def merge(target, patch):
 
 
 def validate_override(override):
-    if override["type"] == "YAML":
+    if override["type"] == "JS":
+        from .javascript import validate
+        try:
+            validate(override.get('body', ''))
+        except ValueError as exc:
+            raise ValueError('JS 覆写「%s」校验失败: %s' % (override.get('name', override.get('id', '')), exc)) from None
+    elif override["type"] == "YAML":
         merge({}, load_map(override.get("body", "")))
     else:
         for line in override.get("body", "").splitlines():
@@ -234,11 +240,19 @@ def render(data, output_id):
         override = overrides[ident]
         if not override.get("enabled", True):
             continue
-        validate_override(override)
-        if override["type"] == "YAML":
+        if override["type"] == "JS":
+            from .javascript import execute
+            try:
+                root = execute(override.get('body', ''), root)
+            except ValueError as exc:
+                raise ValueError('JS 覆写「%s」失败: %s' % (override['name'], exc)) from None
+        elif override["type"] == "YAML":
+            validate_override(override)
             merge(root, expand(load_map(override.get("body", "")), names))
         else:
+            validate_override(override)
             rules = [s.strip() for s in override.get("body", "").splitlines()
                      if s.strip() and not s.lstrip().startswith("#")]
             root["rules"] = rules + root.get("rules", [])
+    check(isinstance(root.get('proxies', []), list), '生成配置的 proxies 必须是列表')
     return {"yaml": dump(root), "nodeCount": len(root.get("proxies", [])), "warnings": warnings, "name": output["name"]}

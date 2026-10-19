@@ -8,7 +8,7 @@ from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.1-8"
+VERSION = "0.1.1-11"
 EPOCH = 1792339200  # 2026-10-19 00:00 UTC, deterministic archive timestamps.
 
 
@@ -92,7 +92,7 @@ uci commit firewall
 exit 0
 '''
     manifest = [build("fii", collect(ROOT / "fii/files"),
-                      "python3, python3-yaml, ca-bundle, firewall4, ip-full, kmod-nft-tproxy, kmod-nft-socket, kmod-tun, kmod-dummy",
+                      "python3, python3-yaml, node, ca-bundle, firewall4, ip-full, kmod-nft-tproxy, kmod-nft-socket, kmod-tun, kmod-dummy",
                       controls=[("postinst", postinst, 0o755), ("prerm", prerm, 0o755), ("postrm", postrm, 0o755)])]
     luci_entries = collect(ROOT / "luci-app-fii/root") + collect(ROOT / "luci-app-fii/htdocs", "www/")
     luci_postinst = b'''#!/bin/sh

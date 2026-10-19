@@ -1,7 +1,7 @@
 {
   "luci-app-fii": {
     "description": "Manage FII subscriptions and Mihomo service",
-    "read": { "ubus": { "luci.fii": ["get", "status", "preview", "export", "logs", "job", "nodes", "groups", "core_info", "core_check", "network"] } },
-    "write": { "ubus": { "luci.fii": ["save", "refresh", "apply", "service", "import", "import_preview", "select", "core_update", "core_channel"] } }
+    "read": { "ubus": { "luci.fii": ["get", "status", "preview", "export", "logs", "job", "nodes", "groups", "core_info", "core_check", "network", "transfer_read"] } },
+    "write": { "ubus": { "luci.fii": ["save", "refresh", "apply", "service", "import", "import_preview", "select", "core_update", "core_channel", "transfer_begin", "transfer_append", "transfer_invoke", "transfer_release"] } }
   }
 }

@@ -6,19 +6,87 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 var methods = {};
+var rpcChunkSize = 16 * 1024;
+function transportError(err) {
+    return /XHR|RPC reply|HTTP error (?:0|413|502|504)|Failed to fetch|NetworkError/i.test(err.message || '');
+}
+function reduceChunk(size, onProgress) {
+    if (size <= 1024) return false;
+    rpcChunkSize = Math.min(rpcChunkSize, Math.max(1024, Math.floor(size / 2)));
+    if (onProgress) onProgress({ message: '正在调整传输大小并重试…' });
+    return true;
+}
 ['get', 'status', 'save', 'refresh', 'preview', 'apply', 'service', 'export', 'import',
- 'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'core_info', 'core_check', 'core_update', 'core_channel', 'network'].forEach(function(name) {
-    methods[name] = rpc.declare({ object: 'luci.fii', method: name, params: ['payload'], expect: { '': {} } });
+ 'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'core_info', 'core_check', 'core_update', 'core_channel', 'network',
+ 'transfer_begin', 'transfer_append', 'transfer_invoke', 'transfer_read', 'transfer_release'].forEach(function(name) {
+    methods[name] = rpc.declare({ object: 'luci.fii', method: name, params: ['payload'], expect: { '': {} }, nobatch: true });
 });
 
-async function call(name, payload, onProgress) {
-    var reply = await methods[name](JSON.stringify(payload || {}));
+async function rpcReply(name, payload, onProgress) {
+    var body = JSON.stringify(payload || {}), reply;
+    try {
+        reply = await methods[name](body);
+    } catch (err) {
+        throw new Error('请求 ' + name + ' 失败（参数 ' + new TextEncoder().encode(body).length + ' 字节）：' + err.message);
+    }
     if (!reply.ok) throw new Error(reply.error || 'FII 请求失败');
+    if (reply.responseTransfer) {
+        var transfer = reply.responseTransfer;
+        if (!Number.isSafeInteger(transfer.size) || transfer.size <= 0 || transfer.size > 32 * 1024 * 1024) throw new Error('响应大小无效');
+        var bytes = new Uint8Array(transfer.size), offset = 0;
+        try {
+            while (offset < bytes.length) {
+                var part, requestedSize = rpcChunkSize;
+                try {
+                    part = await rpcReply('transfer_read', { id: transfer.id, offset: offset, size: requestedSize });
+                } catch (err) {
+                    if (transportError(err) && reduceChunk(requestedSize, onProgress)) continue;
+                    throw err;
+                }
+                var data = Uint8Array.from(atob(part.result.data), function(c) { return c.charCodeAt(0); });
+                if (!data.length || offset + data.length > bytes.length) throw new Error('响应分块大小无效');
+                bytes.set(data, offset); offset += data.length;
+                if (onProgress) onProgress({ message: '正在读取检查结果…', received: offset, total: bytes.length });
+            }
+            reply = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        } finally {
+            await methods.transfer_release(JSON.stringify({ id: transfer.id })).catch(function() {});
+        }
+    }
+    return reply;
+}
+
+async function call(name, payload, onProgress) {
+    var encoded = new TextEncoder().encode(JSON.stringify(payload || {})), reply;
+    if (encoded.length > 1024) {
+        var upload = (await rpcReply('transfer_begin', { size: encoded.length })).result;
+        try {
+            if (upload.protocol !== 2) throw new Error('FII 后端与界面版本不一致，请同时升级两个安装包到同一版本，并强制刷新页面。');
+            for (var offset = 0; offset < encoded.length;) {
+                var size = Math.min(upload.chunkSize, rpcChunkSize);
+                var chunk = encoded.subarray(offset, offset + size);
+                var data = btoa(String.fromCharCode.apply(null, chunk));
+                try {
+                    await rpcReply('transfer_append', { id: upload.id, offset: offset, data: data });
+                } catch (err) {
+                    if (transportError(err) && reduceChunk(size, onProgress)) continue;
+                    throw err;
+                }
+                offset += chunk.length;
+                if (onProgress) onProgress({ message: '正在传输备份…', received: offset, total: encoded.length });
+            }
+            reply = await rpcReply('transfer_invoke', { id: upload.id, method: name }, onProgress);
+        } finally {
+            await methods.transfer_release(JSON.stringify({ id: upload.id })).catch(function() {});
+        }
+    } else {
+        reply = await rpcReply(name, payload, onProgress);
+    }
     var result = reply.result;
     if (result && result.jobId) {
         for (var i = 0; i < (name === 'core_update' ? 1200 : 260); i++) {
             await new Promise(function(resolve) { window.setTimeout(resolve, 750); });
-            var job = await call('job', { id: result.jobId });
+            var job = await call('job', { id: result.jobId }, onProgress);
             if (onProgress && job.progress) onProgress(job.progress);
             if (job.done) {
                 if (!job.ok) throw new Error(job.error);
@@ -529,10 +597,14 @@ return view.extend({
     editOverride: function(override) {
         var self = this, item = Object.assign({ id: 'o_' + Date.now().toString(36), name: '', type: 'YAML', body: 'rules+: []\n', enabled: true, global: false, refreshMinutes: 720 }, override || {});
         var name = field('名称', item.name, { required: true });
-        var type = field('类型', item.type, { select: [['YAML', 'YAML 覆写'], ['RULES', '规则列表']] });
+        var type = field('类型', item.type, { select: [['YAML', 'YAML 覆写'], ['RULES', '规则列表'], ['JS', 'JavaScript 覆写']] });
         var enabled = toggle('启用覆写', item.enabled), global = toggle('全局覆写', item.global, '自动应用于所有输出。');
         var body = field('覆写内容', item.body, { area: true, code: true, rows: 14,
-            help: 'YAML：+rules 前插、rules+ 追加、rules! 替换；{{proxy_names}} 展开节点名列表。RULES：每行一条，插入到 rules 开头。' });
+            help: 'YAML：+rules 前插、rules+ 追加、rules! 替换；{{proxy_names}} 展开节点名列表。RULES：每行一条，插入到 rules 开头。JS：同步 main(config)，返回完整配置对象。' });
+        var defaults = { YAML: 'rules+: []\n', RULES: '', JS: 'function main(config) {\n  config.rules.unshift("DOMAIN,example.com,DIRECT");\n  return config;\n}\n' };
+        type.control.addEventListener('change', function() {
+            if (Object.keys(defaults).some(function(key) { return body.read() === defaults[key]; })) body.control.value = defaults[type.read()];
+        });
         var url = field('远程更新 URL（可选）', item.url || '', { type: 'url' });
         var auto = toggle('自动更新远程覆写', item.autoRefresh);
         var interval = field('刷新间隔（分钟）', item.refreshMinutes, { type: 'number', min: 5, max: 525600, required: true });
@@ -722,15 +794,20 @@ return view.extend({
 
     importBackup: function() {
         var self = this, input = E('input', { type: 'file', accept: '.json,application/json', 'aria-label': '选择备份 JSON 文件' });
-        ui.showModal('导入备份', [E('p', {}, '选择 FII 或 SubConverter Flutter 导出的 JSON 文件。下一步会显示导入摘要。'), input, actions([
+        var progress = E('p', { role: 'status', 'aria-live': 'polite', 'class': 'fii-muted' }, '');
+        function report(p) { progress.textContent = p.message + (p.total ? ' ' + Math.round(p.received * 100 / p.total) + '%' : ''); }
+        ui.showModal('导入备份', [E('p', {}, '选择 FII 或 SubConverter Flutter 导出的 JSON 文件。下一步会显示导入摘要。'), input, progress, actions([
             button('取消', function() { ui.hideModal(); }), button('检查备份', async function() {
                 if (!input.files.length) throw new Error('请先选择文件');
                 if (input.files[0].size > 16 * 1024 * 1024) throw new Error('备份不能超过 16 MiB');
-                var raw = JSON.parse(await input.files[0].text()), result = await call('import_preview', { data: raw }), revision = self.data.revision;
-                ui.showModal('确认导入', [E('p', {}, '将替换为 ' + result.data.sources.length + ' 个订阅、' + result.data.overrides.length + ' 个覆写、' + result.data.outputs.length + ' 个输出。'),
+                var raw = JSON.parse(await input.files[0].text());
+                progress.textContent = '正在检查备份…';
+                var result = await call('import_preview', { data: raw }, report), revision = self.data.revision;
+                ui.showModal('确认导入', [E('p', {}, '将替换为 ' + result.summary.sources + ' 个订阅、' + result.summary.overrides + ' 个覆写、' + result.summary.outputs + ' 个输出。'),
                     E('p', { 'class': 'fii-notice' }, result.warnings.join('；') || '保留路由器设置与当前运行配置。'),
-                    actions([button('取消', function() { ui.hideModal(); }), button('导入并替换配置库', async function() {
-                        var r = await call('import', { data: raw, revision: revision }); notify(r.message); await self.reload(); ui.hideModal();
+                    progress, actions([button('取消', function() { ui.hideModal(); }), button('导入并替换配置库', async function() {
+                        progress.textContent = '正在导入备份…';
+                        var r = await call('import', { data: raw, revision: revision }, report); notify(r.message); await self.reload(); ui.hideModal();
                     }, true)])]);
             }, true)
         ])]);
