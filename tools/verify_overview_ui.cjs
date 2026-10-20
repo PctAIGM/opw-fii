@@ -29,6 +29,7 @@ const fixture=process.argv.includes('--fixture'),candidate=fixture||process.argv
     const respond=(result,ok=true)=>route.fulfill({contentType:'application/json',body:JSON.stringify({jsonrpc:'2.0',id:call.id,result:[0,ok?{ok:true,result}:{ok:false,error:result}]})});
     if(method==='groups')groupReads++;
     if(fixture&&method==='groups')return groupFailure?respond('模拟读取失败',false):respond(data);
+    if(fixture&&method==='resources')return respond({running:true,source:'runtime',geo:[],rulesets:[],rulesError:''});
     if(fixture&&method==='select'){
      selects++;if(selectFailure)return respond('模拟切换失败',false);
      const payload=JSON.parse(call.params[3].payload),group=data.groups.find(g=>g.name===payload.group);
@@ -36,7 +37,7 @@ const fixture=process.argv.includes('--fixture'),candidate=fixture||process.argv
      else{group.now=payload.name;if(['URLTest','Fallback'].includes(group.type))group.fixed=payload.name;}
      return respond({});
     }
-    if(!['get','status','network','core_info','groups','job','transfer_read','transfer_release'].includes(method)){blocked.push(method);return route.abort('blockedbyclient');}
+    if(!['get','status','network','core_info','groups','resources','job','transfer_read','transfer_release'].includes(method)){blocked.push(method);return route.abort('blockedbyclient');}
     if(fixture&&method==='status'){
      const response=await route.fetch(),json=await response.json();Object.assign(json.result[1].result,{running:true,activeOutputId:'1',appliedRevision:33});
      return route.fulfill({response,body:JSON.stringify(json)});
@@ -47,13 +48,13 @@ const fixture=process.argv.includes('--fixture'),candidate=fixture||process.argv
   await page.goto(new URL('/cgi-bin/luci/admin/services/fii',process.env.FII_ROUTER_URL).href);
   await page.locator('input[type=password]').fill(process.env.FII_ROUTER_PASSWORD);
   await page.locator('button[type=submit],input[type=submit]').first().click();
-  const nav=page.locator('.fii-tabs');await nav.getByRole('button',{name:'代理组',exact:true}).waitFor({timeout:60000});
+  const nav=page.locator('.fii-tabs');await nav.getByRole('button',{name:'控制面板',exact:true}).waitFor({timeout:60000});
   const styleHref=await page.locator('#fii-style').getAttribute('href');
   assert.match(styleHref,/\/fii\/style\.css\?v=[0-9a-f]{16}$/);
   assert.equal(await page.locator('#fii-style').count(),1);
   assert.equal(await page.locator('.fii-proxies-panel').count(),0);assert.equal(groupReads,0);
   assert.equal(await page.getByText('三步开始',{exact:true}).count(),0);
-  await nav.getByRole('button',{name:'代理组',exact:true}).click();assert.equal(new URL(page.url()).hash,'#proxies');
+  await nav.getByRole('button',{name:'控制面板',exact:true}).click();assert.equal(new URL(page.url()).hash,'#proxies');
   const panel=page.locator('.fii-proxies-panel');await panel.waitFor();
   await page.waitForFunction(()=>document.querySelector('.fii-proxies-panel')?.getAttribute('aria-busy')===null,{},{timeout:60000});
   const first=panel.locator('[data-group="节点选择"]');

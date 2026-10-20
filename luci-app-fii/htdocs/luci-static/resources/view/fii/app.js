@@ -7,7 +7,7 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Content version is synchronized by tools/build_ipk.py, including same-version rebuilds.
-var fiiStyleHash = '8cdad64bbc11a084';
+var fiiStyleHash = 'ad673c223f5c2c9a';
 var fiiStylePromise = null;
 function loadStyle() {
     var href = L.resource('fii/style.css') + '?v=' + fiiStyleHash;
@@ -47,7 +47,7 @@ function reduceChunk(size, onProgress, download) {
     return true;
 }
 ['get', 'status', 'save', 'refresh', 'preview', 'apply', 'service', 'export', 'import',
- 'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'core_info', 'core_check', 'core_update', 'core_channel', 'network',
+ 'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'resource_update', 'core_info', 'core_check', 'core_update', 'core_channel', 'network',
  'transfer_begin', 'transfer_append', 'transfer_invoke', 'transfer_read', 'transfer_release', 'transfer_status'].forEach(function(name) {
     methods[name] = rpc.declare({ object: 'luci.fii', method: name, params: ['payload'], expect: { '': {} }, nobatch: true });
 });
@@ -124,7 +124,7 @@ async function call(name, payload, onProgress) {
     }
     var result = reply.result;
     if (result && result.jobId) {
-        var deadline = Date.now() + (name === 'core_update' ? 1000000 : 220000);
+        var deadline = Date.now() + (name === 'core_update' || name === 'resource_update' ? 1000000 : 220000);
         while (Date.now() < deadline) {
             var polledAt = Date.now();
             var job = await call('job', { id: result.jobId, waitMs: 600 }, onProgress);
@@ -441,7 +441,7 @@ function parseLogSnapshot(snapshot) {
         var syslog = clean.match(/^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+\S+\.([a-z]+)\s+([^:]+):\s?(.*)$/i);
         if (syslog) { time = syslog[1]; severity = syslog[2]; tag = syslog[3]; message = syslog[4]; }
         var embedded = message.match(/\blevel=(?:"|')?(debug|info|warn(?:ing)?|error|fatal|panic|silent)\b/i);
-        var core = !preparation && (/^mihomo(?:\[|$)/i.test(tag) || !!embedded);
+        var core = !preparation && (/^(?:mihomo|core-run)(?:\[|$)/i.test(tag) || !!embedded);
         if (embedded) {
             severity = embedded[1];
             var stamp = message.match(/\btime="([^"]+)"/); if (stamp) time = stamp[1];
@@ -479,7 +479,7 @@ return view.extend({
         this.data = result[0].data;
         this.status = result[1];
         this.network = result[2] || {};
-        this.tab = ['overview', 'proxies', 'sources', 'overrides', 'outputs', 'settings', 'logs'].indexOf(location.hash.slice(1)) >= 0 ? location.hash.slice(1) : 'overview';
+        this.tab = ['overview', 'sources', 'mihomo', 'overrides', 'outputs', 'settings', 'proxies', 'logs'].indexOf(location.hash.slice(1)) >= 0 ? location.hash.slice(1) : 'overview';
         var self = this;
         this.stateNode = E('span');
         this.body = E('div', { 'class': 'fii-body' });
@@ -522,6 +522,9 @@ return view.extend({
         if (this.refreshProxyGroups && this.proxyGroupsStamp !== groupsStamp) {
             this.proxyGroupsStamp = groupsStamp; this.refreshProxyGroups();
         }
+        if (this.refreshResources && this.resourcesStamp !== groupsStamp) {
+            this.resourcesStamp = groupsStamp; this.refreshResources();
+        }
     },
 
     reload: async function() {
@@ -531,15 +534,19 @@ return view.extend({
 
     draw: function() {
         var self = this;
+        console.log('[draw]', this.tab, new Error().stack.split('\n').slice(1, 4).join(' | '));
         if (this.disposeProxyGroups) this.disposeProxyGroups();
         if (this.disposeLogs) this.disposeLogs();
+        if (this.disposeResources) this.disposeResources();
+        this.disposeResources = null;
+        this.refreshResources = null;
         this.disposeLogs = null;
         this.disposeProxyGroups = null;
         this.liveStatus = null;
         this.runtimeStamp = null;
         this.refreshProxyGroups = null;
         this.nav.replaceChildren.apply(this.nav, [
-            ['overview', '概览'], ['proxies', '代理组'], ['sources', '订阅源'], ['overrides', '覆写'], ['outputs', '输出配置'], ['settings', '路由器设置'], ['logs', '日志']
+            ['overview', '概览'], ['sources', '订阅源'], ['mihomo', 'Mihomo'], ['overrides', '覆写'], ['outputs', '输出配置'], ['settings', '路由器设置'], ['proxies', '控制面板'], ['logs', '日志']
         ].map(function(tab) {
             return button(tab[1], function() { self.tab = tab[0]; history.replaceState(null, '', '#' + tab[0]); self.draw(); }, false,
                 { 'class': 'fii-tab ' + (self.tab === tab[0] ? 'active' : ''), 'aria-current': self.tab === tab[0] ? 'page' : null });
@@ -599,12 +606,107 @@ return view.extend({
         this.liveStatus = E('div');
         return E('div', {}, [E('div', { 'class': 'fii-stats' }, [['订阅源', this.data.sources.length], ['覆写', this.data.overrides.length], ['输出配置', this.data.outputs.length]].map(function(v) {
             return E('div', { 'class': 'fii-stat' }, [E('span', {}, v[0]), E('strong', {}, String(v[1]))]);
-        })), this.liveStatus, this.corePanel()
+        })), this.liveStatus,
+        E('section', { 'class': 'fii-card' }, [E('h3', {}, 'Mihomo'), E('p', { 'class': 'fii-muted' }, '内核版本：' + (this.status.coreVersion || '尚未安装')),
+            actions([button('内核与端口管理', function() { self.tab = 'mihomo'; history.replaceState(null, '', '#mihomo'); self.draw(); })])])
         ]);
     },
 
     proxiesPage: function() {
-        return this.proxyGroupsPanel();
+        return E('div', { 'class': 'fii-control-panel' }, [this.proxyGroupsPanel(), this.resourcesPanel()]);
+    },
+
+    resourcesPanel: function() {
+        var self = this, data = null, loading = false, stale = true, serial = 0, disposed = false;
+        var task = self.resourceTask || (self.resourceTask = { pending: false, message: '', error: false });
+        var info = E('p', { 'class': 'fii-muted', role: 'status', 'aria-live': 'polite' });
+        var feedback = E('p', { role: 'status', 'aria-live': 'polite' });
+        var geo = E('div', { 'class': 'fii-resource-grid' }), rules = E('div', { 'class': 'fii-resource-list' });
+        var refresh = button('刷新资源状态', load, false);
+        var updateGeo = E('button', { type: 'button', 'class': 'cbi-button cbi-button-action important',
+            disabled: 'disabled', click: function() { update('geo'); } }, '更新 GEO 数据');
+        var panel = E('section', { 'class': 'fii-resources', 'aria-label': '外部资源' }, [
+            E('div', { 'class': 'fii-resource-heading' }, [E('h3', {}, '外部资源'), refresh]), info,
+            E('div', { 'class': 'fii-resource-heading' }, [E('h4', {}, 'GEO 数据'), updateGeo]),
+            E('p', { 'class': 'fii-muted' }, '由内核统一更新已启用的 GEOSITE、GEOIP / MMDB 和 ASN 数据。GEOIP 与 MMDB 按 geodata-mode 二选一，未启用的资源会跳过。文件存在不代表当前规则正在使用。'), geo,
+            feedback, E('h4', {}, '规则资源 · Ruleset'),
+            E('p', { 'class': 'fii-muted' }, '运行时从内核读取已加载的 rule-providers；远程资源可更新，本地文件可重新加载，内联规则通过覆写修改。'), rules
+        ]);
+        function render() {
+            refresh.disabled = loading;
+            updateGeo.disabled = loading || stale || !data || !data.running || task.pending;
+            updateGeo.setAttribute('aria-busy', String(task.pending && task.key === 'geo'));
+            updateGeo.textContent = task.pending && task.key === 'geo' ? '正在更新 GEO…' : '更新 GEO 数据';
+            feedback.textContent = task.message;
+            feedback.className = task.error ? 'fii-error' : 'fii-muted';
+            if (!data) return;
+            geo.replaceChildren.apply(geo, data.geo.map(function(item) {
+                return E('article', { 'class': 'fii-resource-card' }, [
+                    E('div', { 'class': 'fii-resource-heading' }, [E('strong', {}, item.name), badge(item.exists ? '已下载' : '未下载', item.exists ? 'success' : '')]),
+                    E('p', {}, item.file),
+                    E('p', { 'class': 'fii-muted' }, item.exists ? bytes(item.size) + ' · 文件修改于 ' + date(item.modifiedAt) : '内核需要时下载此数据'),
+                    item.url ? E('details', { 'class': 'fii-resource-source' }, [E('summary', {}, '配置来源'), E('span', {}, item.url)]) : E('small', { 'class': 'fii-resource-source' }, '来源：内核默认源')
+                ]);
+            }));
+            rules.replaceChildren();
+            if (data.rulesError) {
+                rules.appendChild(E('p', { 'class': 'fii-error', role: 'alert' }, '规则资源读取失败：' + data.rulesError));
+                return;
+            }
+            data.rulesets.forEach(function(item) {
+                var local = String(item.vehicleType).toLowerCase() === 'file';
+                var control = button(task.pending && task.key === 'ruleset:' + item.name ? '正在更新…' : local ? '重新加载' : '更新资源', function() {
+                    return update('ruleset', item.name);
+                }, false, { disabled: loading || stale || task.pending || !item.canUpdate, 'aria-label': (local ? '重新加载规则资源 ' : '更新规则资源 ') + item.name });
+                rules.appendChild(E('article', { 'class': 'fii-resource-row' }, [E('div', { 'class': 'fii-resource-details' }, [
+                    E('strong', {}, item.name),
+                    E('p', { 'class': 'fii-muted' }, [item.vehicleType || '未知来源', item.behavior || '未知策略', item.format || '未知格式',
+                        item.ruleCount == null ? '规则数未知' : item.ruleCount + ' 条规则'].join(' · ')),
+                    E('p', { 'class': 'fii-muted' }, item.updatedAt && !/^0001-/.test(item.updatedAt) ? '内核更新时间：' + new Date(item.updatedAt).toLocaleString() : '内核更新时间：未知'),
+                    item.url ? E('details', { 'class': 'fii-resource-source' }, [E('summary', {}, '配置来源'), E('span', {}, item.url)]) : ''
+                ]), control]));
+            });
+            if (!data.rulesets.length) rules.appendChild(E('p', { 'class': 'fii-muted' }, data.source === 'none' ? '请先生成运行配置。' : data.running ? '当前内核没有加载规则资源。' : '当前运行配置快照没有规则资源。'));
+        }
+        async function load() {
+            var request = ++serial; loading = true; info.textContent = '正在读取资源…'; render();
+            try {
+                var result = await call('resources');
+                if (disposed || request !== serial) return;
+                data = result; stale = false;
+                info.textContent = (data.running ? '内核运行中' : data.source === 'none' ? '尚未生成运行配置' : '配置快照 · 内核已停止，更新不可用') +
+                    ' · GEOIP 模式：' + (data.geodataMode ? 'GEOIP.dat' : 'MMDB') +
+                    ' · GEO 自动更新：' + (data.geoAutoUpdate ? '每 ' + data.geoUpdateInterval + ' 小时' : '关闭');
+                info.className = 'fii-muted';
+            } catch (err) {
+                if (disposed || request !== serial) return;
+                stale = true; info.textContent = '资源状态读取失败：' + err.message; info.className = 'fii-error';
+            } finally {
+                if (!disposed && request === serial) { loading = false; render(); }
+            }
+        }
+        async function update(kind, name) {
+            if (task.pending || stale || !data || !data.running) return;
+            task.pending = true; task.key = kind + (name == null ? '' : ':' + name);
+            task.error = false; task.message = '正在请求内核更新资源…'; render();
+            try {
+                var result = await call('resource_update', { kind: kind, name: name }, function(progress) {
+                    task.message = progress.message; if (!disposed) render();
+                });
+                task.message = result.message;
+            } catch (err) {
+                task.error = true; task.message = '更新失败：' + err.message + '；请检查内核日志。' +
+                    (kind === 'geo' ? 'GEO 多文件更新失败时，部分数据可能已更新。' : '');
+            } finally {
+                task.pending = false;
+                if (self.refreshResources) await self.refreshResources();
+            }
+        }
+        self.resourcesStamp = JSON.stringify([self.status.running, self.status.activeOutputId, self.status.appliedRevision]);
+        self.refreshResources = load;
+        self.disposeResources = function() { disposed = true; serial++; };
+        load();
+        return panel;
     },
 
     proxyGroupsPanel: function() {
@@ -664,7 +766,7 @@ return view.extend({
             return names;
         }
         function nodeList(group) {
-            var gs = groupState(group.name), names = filteredNodes(group), columns = 2, start = -1, rowHeight = 84;
+            var gs = groupState(group.name), names = filteredNodes(group), columns = 2, start = -1, rowHeight = 64;
             var feedback = E('p', { 'class':'fii-proxy-feedback' + (gs.error ? ' fii-error' : ''), role:'status', hidden:!gs.pending && !gs.error ? 'hidden' : null }, gs.pending ? '正在更新选择…' : gs.error);
             var viewport = E('div', { 'class':'fii-proxy-viewport', 'aria-label':group.name + '的节点', role:'region', tabindex:'0' });
             var space = E('div', { 'class':'fii-proxy-space' }), grid = E('div', { 'class':'fii-proxy-nodes' });
@@ -672,7 +774,7 @@ return view.extend({
             function drawNodes(force) {
                 if (!viewport.isConnected) return;
                 var cols = Math.max(1, Math.floor((viewport.clientWidth + 8) / 148));
-                var rows = Math.ceil(names.length / cols), height = Math.min(352, rows * rowHeight - 8);
+                var rows = Math.ceil(names.length / cols), height = Math.min(280, rows * rowHeight - 8);
                 viewport.style.height = Math.max(0, height) + 'px'; space.style.height = Math.max(0, rows * rowHeight - 8) + 'px';
                 var first = Math.max(0, Math.floor(viewport.scrollTop / rowHeight) - 2);
                 if (!force && first === start && columns === cols) return;
@@ -879,10 +981,134 @@ return view.extend({
             E('p', { 'class': 'fii-muted' }, '从官方发布下载 amd64-compatible 内核，校验 SHA-256 后安装。运行中的服务会在下载和测试完成后切换，失败时恢复原内核。')]);
     },
 
+    mihomoPage: function() {
+        var self = this, s = this.data.settings;
+        var ports = {};
+        [['mixedPort', '本机混合代理端口'], ['redirPort', 'REDIRECT 端口'], ['tproxyPort', 'TPROXY 端口'], ['dnsPort', 'DNS 端口'], ['controllerPort', '控制器端口']].forEach(function(pair) {
+            ports[pair[0]] = field(pair[1], s[pair[0]], { type: 'number', min: 1024, max: 65535, required: true });
+        });
+        var currentAddress = s.controllerAddress || '127.0.0.1';
+        var addressOptions = currentAddress !== '127.0.0.1' && currentAddress !== '0.0.0.0'
+            ? [[currentAddress, currentAddress + ' · 自定义']] : [];
+        var controllerAddress = field('控制器监听地址', currentAddress, { select: addressOptions.concat([
+            ['127.0.0.1', '仅本机（默认）'], ['0.0.0.0', '所有 IPv4 接口 · 局域网面板可达']]),
+            help: '面板等工具通过 路由器IP:控制器端口 访问 Mihomo，需携带控制器密钥。' });
+        var secret = field('控制器密钥', s.secret, { type: 'password', help: '留空表示控制器不启用认证。监听局域网时建议设置强密钥。' });
+        var form = E('form', { 'class': 'fii-settings', submit: function(event) { event.preventDefault(); } });
+        var canApply = !!this.status.activeOutputId && this.status.coreInstalled;
+        async function saveDefaults(apply) {
+            var invalid = Array.from(form.querySelectorAll('input,select')).find(function(el) { return !el.disabled && !el.checkValidity(); });
+            if (invalid) { invalid.reportValidity(); return; }
+            var settings = { controllerAddress: controllerAddress.read(), secret: secret.read() };
+            Object.keys(ports).forEach(function(k) { settings[k] = ports[k].read(); });
+            var changed = {};
+            Object.keys(settings).forEach(function(key) {
+                if (JSON.stringify(settings[key]) !== JSON.stringify(self.data.settings[key])) changed[key] = settings[key];
+            });
+            if (Object.keys(changed).length) {
+                var saved = await call('save', { patch: { settings: changed }, compact: true, revision: self.data.revision });
+                self.data = saved.data;
+            }
+            if (apply) {
+                try {
+                    var result = await call('apply', { id: self.status.activeOutputId });
+                    notify(result.message + ((result.warnings || []).length ? '；' + result.warnings.join('；') : ''));
+                } catch (err) { throw new Error('默认值已保存，更新运行配置失败：' + err.message); }
+                finally { await self.reload(); }
+            } else { self.draw(); notify('Mihomo 默认值已保存，应用后生效'); }
+        }
+        var saveActions = actions([button('保存默认值', function() { return saveDefaults(false); }),
+            button('保存并更新配置', function() { return saveDefaults(true); }, true, { disabled: !canApply })]);
+        saveActions.classList.add('fii-settings-save');
+        form.appendChild(E('section', { 'class': 'fii-card' }, [E('h3', {}, '连接与端口（默认值）'),
+            E('p', { 'class': 'fii-muted' }, '这些数值在生成运行配置时作为默认值写入；覆写中显式配置的字段优先于此处，实际生效值可在输出预览中查看。'),
+            E('div', { 'class': 'fii-settings-grid fii-port-grid' }, Object.keys(ports).map(function(k) { return ports[k].node; }).concat(controllerAddress.node)),
+            secret.node, saveActions, !canApply ? E('p', { 'class': 'fii-muted' }, '首次使用请先在输出页生成一份运行配置。') : '']));
+        return E('div', {}, [this.corePanel(), this.mihomoBasics(), form,
+            E('p', { 'class': 'fii-muted' }, 'Mihomo 的 DNS、规则、代理组和通用参数始终在覆写中配置；这里只提供内核与接入默认值。')]);
+    },
+
+    mihomoBasics: function() {
+        var self = this;
+        var override = (this.data.overrides || []).find(function(item) { return item.origin === 'legacy-mihomo-settings'; });
+        if (!override) return '';
+        var host = E('div');
+        function card(content) {
+            return E('section', { 'class': 'fii-card' }, [E('div', { 'class': 'fii-card-heading' }, [
+                E('h3', {}, 'Mihomo 基础配置'), actions([badge('全局 · 最低优先级', 'success')])]),
+                E('p', { 'class': 'fii-muted' }, '由旧版设置迁移而来，作为全局覆写先于其他覆写执行。')].concat(content));
+        }
+        function render(body) {
+            var policy = null, problem = '';
+            try { policy = JSON.parse(body || '{}'); }
+            catch (err) { problem = err.message; }
+            if (!problem && (!policy || typeof policy !== 'object' || Array.isArray(policy))) problem = '内容不是对象';
+            if (problem) {
+                // An unparsable body stays editable as raw YAML instead of a dead end.
+                var raw = field('覆写内容', body, { area: true, rows: 12, code: true });
+                host.replaceChildren(card([E('p', { 'class': 'fii-notice' }, '内容无法解析为表单（' + problem + '），以 YAML 文本编辑。'),
+                    raw.node, actions([button('保存内容', async function() {
+                        self.basicsBody = null;
+                        await self.save({ kind: 'overrides', id: override.id, fields: { body: raw.read() } });
+                    }, true)])]));
+                return;
+            }
+            var dns = policy.dns && typeof policy.dns === 'object' ? policy.dns : null;
+            var tun = policy.tun && typeof policy.tun === 'object' ? policy.tun : null;
+            var ipv6 = toggle('IPv6 解析', !!policy.ipv6, '同时作用于 DNS 的 IPv6 解析。');
+            var mode = dns && 'enhanced-mode' in dns ? field('DNS 模式', dns['enhanced-mode'], { select: [['fake-ip', 'Fake-IP'], ['redir-host', 'Redir-Host']] }) : null;
+            var nameservers = dns && Array.isArray(dns.nameserver) ? entries('DNS 服务器', dns.nameserver, 'https://dns.alidns.com/dns-query') : null;
+            var bootstrap = dns && Array.isArray(dns['default-nameserver']) ? entries('引导 DNS（IP）', dns['default-nameserver'], '223.5.5.5') : null;
+            var filters = dns && Array.isArray(dns['fake-ip-filter']) ? entries('Fake-IP 过滤', dns['fake-ip-filter'], '+.lan') : null;
+            var proxyDns = dns && Array.isArray(dns['proxy-server-nameserver']) ? entries('代理服务器 DNS', dns['proxy-server-nameserver'], 'https://dns.alidns.com/dns-query') : null;
+            var stack = tun && 'stack' in tun ? field('TUN 协议栈', tun.stack, { select: [['mixed', 'Mixed（默认）'], ['system', 'System'], ['gvisor', 'GVisor']] }) : null;
+            var mtu = tun && typeof tun.mtu === 'number' ? field('TUN MTU', tun.mtu, { type: 'number', min: 1280, max: 9000, required: true }) : null;
+            var grid = [];
+            if (mode) grid.push(mode.node);
+            if (stack) grid.push(stack.node);
+            if (mtu) grid.push(mtu.node);
+            host.replaceChildren(card([ipv6.node,
+                grid.length ? E('div', { 'class': 'fii-settings-grid' }, grid) : '',
+                nameservers ? nameservers.node : '', bootstrap ? bootstrap.node : '',
+                filters ? filters.node : '', proxyDns ? proxyDns.node : '',
+                actions([button('保存基础配置', async function() {
+                    policy.ipv6 = ipv6.read();
+                    if (dns) dns.ipv6 = ipv6.read();
+                    if (mode) dns['enhanced-mode'] = mode.read();
+                    if (nameservers) dns.nameserver = nameservers.read();
+                    if (bootstrap) dns['default-nameserver'] = bootstrap.read();
+                    if (filters) dns['fake-ip-filter'] = filters.read();
+                    if (proxyDns) dns['proxy-server-nameserver'] = proxyDns.read();
+                    if (stack) tun.stack = stack.read();
+                    if (mtu) tun.mtu = parseInt(mtu.read(), 10);
+                    self.basicsBody = null;
+                    await self.save({ kind: 'overrides', id: override.id, fields: { body: JSON.stringify(policy, null, 2) } });
+                }, true)]),
+                E('p', { 'class': 'fii-muted' }, '保存后需在输出页应用才生效；未在此展示的字段请通过普通覆写调整。')]));
+        }
+        if (self.basicsBody != null) {
+            // Cached from the first fetch; redraws render synchronously instead of
+            // coupling every render to another full-content transfer.
+            render(self.basicsBody);
+            return host;
+        }
+        (async function() {
+            // The page snapshot omits bodies; the full migrated content is fetched once.
+            var full = await self.readItem('overrides', override, false, false);
+            self.basicsBody = full && full.body != null ? full.body : '';
+            if (!host.isConnected) return;
+            render(self.basicsBody);
+        })().catch(function(err) {
+            if (!host.isConnected) return;
+            host.replaceChildren(card([E('p', { 'class': 'fii-notice' }, '读取基础配置失败：' + err.message)]));
+        });
+        return host;
+    },
+
     sourcesPage: function() {
         var self = this;
         return E('div', {}, [this.pageHeading('订阅源', '一个订阅只维护一次，可用于多个输出。', button('添加订阅源', function() { return self.editSource(); }, true)),
-            this.data.sources.length ? E('div', { 'class': 'fii-grid' }, this.data.sources.map(function(source) {
+            this.data.sources.length ? E('div', { 'class': 'fii-grid fii-sources-list' }, this.data.sources.map(function(source) {
                 var used = (source.uploadBytes || 0) + (source.downloadBytes || 0);
                 var exhausted = isExhausted(source);
                 return E('article', { 'class': 'fii-card' }, [E('div', { 'class': 'fii-card-heading' }, [E('h3', {}, source.name),
@@ -983,19 +1209,21 @@ return view.extend({
     },
 
     overridesPage: function() {
-        var self = this;
+        var self = this, all = this.data.overrides;
+        // The migrated Mihomo basics live on the Mihomo tab; keep real indexes for ordering.
+        var shown = all.filter(function(item) { return item.origin !== 'legacy-mihomo-settings'; });
         return E('div', {}, [this.pageHeading('覆写', '全局覆写先执行，专属覆写按输出中的选择顺序执行，同一覆写只执行一次。', button('添加覆写', function() { return self.editOverride(); }, true)),
             E('p', { 'class': 'fii-muted' }, '这里管理 Mihomo 的 DNS、规则、代理组和通用参数。全局覆写先按列表顺序执行，专属覆写在输出中选择和排序。路由器流量接管请到路由器设置。'),
-            this.data.overrides.length ? E('div', { 'class': 'fii-override-list', 'aria-label': '覆写列表' }, this.data.overrides.map(function(item, index) {
+            shown.length ? E('div', { 'class': 'fii-override-list', 'aria-label': '覆写列表' }, shown.map(function(item) {
+                var index = all.indexOf(item);
                 return E('article', { 'class': 'fii-card fii-override-row', 'data-id': item.id }, [E('div', { 'class': 'fii-card-heading' }, [
                     E('div', { 'class': 'fii-order-heading' }, [E('span', { 'class': 'fii-order-number', 'aria-label': '列表第 ' + (index + 1) + ' 项' }, String(index + 1)), E('h3', {}, item.name)]),
                     actions([badge(item.type), badge(item.global ? '全局' : '专属'), badge(item.enabled === false ? '已禁用' : '已启用', item.enabled === false ? '' : 'success')])]),
-                    E('p', { 'class': 'fii-muted' }, item.url ? '远程覆写 · ' + date(item.lastRefreshAt) : '本地覆写 · 编辑内容后保存'),
-                    item.origin === 'legacy-mihomo-settings' ? E('p', { 'class': 'fii-notice' }, '保留旧版设置中的 Mihomo 参数，现有覆写在其后执行。可直接编辑这条基础覆写。') : '',
-                    E('details', {}, [E('summary', {}, '内容摘要'), E('pre', { 'class': 'fii-snippet' }, (item.snippet || item.body || '空覆写').slice(0, 240))]),
+                    E('div', { 'class': 'fii-override-meta' }, [E('p', { 'class': 'fii-muted' }, item.url ? '远程覆写 · ' + date(item.lastRefreshAt) : '本地覆写 · 编辑内容后保存'),
+                        E('details', {}, [E('summary', {}, '内容摘要'), E('pre', { 'class': 'fii-snippet' }, (item.snippet || item.body || '空覆写').slice(0, 240))])]),
                     item.lastError ? E('p', { 'class': 'fii-error' }, item.lastError) : '',
                     actions([button('上移', function() { return self.moveOverride(item, index - 1); }, false, { disabled: index === 0, 'aria-label': '上移 ' + item.name }),
-                        button('下移', function() { return self.moveOverride(item, index + 1); }, false, { disabled: index === self.data.overrides.length - 1, 'aria-label': '下移 ' + item.name }),
+                        button('下移', function() { return self.moveOverride(item, index + 1); }, false, { disabled: index === all.length - 1, 'aria-label': '下移 ' + item.name }),
                         button('移动到…', function() { self.positionOverride(item); }, false, { 'aria-label': '移动 ' + item.name + ' 到指定位置' }),
                         button('编辑', function() { return self.editOverride(item); }),
                         item.url ? button('刷新远程内容', async function() { var r = await call('refresh', { kind: 'overrides', id: item.id }); notify(r.message, !r.success); await self.reload(); }) : '',
@@ -1156,11 +1384,6 @@ return view.extend({
         var reserved6 = entries('IPv6 保留地址', s.reservedIpv6 || [], 'fc00::/7');
         var tunTimeout = field('TUN 接口等待时间（秒）', s.tunTimeout || 30, { type: 'number', min: 1, max: 60, required: true });
         var tunInterval = field('TUN 接口检查间隔（秒）', s.tunInterval || 1, { type: 'number', min: 1, max: 10, required: true });
-        var ports = {};
-        [['mixedPort', '本机混合代理端口'], ['redirPort', 'REDIRECT 端口'], ['tproxyPort', 'TPROXY 端口'], ['dnsPort', 'DNS 端口'], ['controllerPort', '本机控制器端口']].forEach(function(pair) {
-            ports[pair[0]] = field(pair[1], s[pair[0]], { type: 'number', min: 1024, max: 65535, required: true });
-        });
-        var secret = field('控制器密钥', s.secret, { type: 'password', required: true, help: '至少 16 字符，控制器只监听 127.0.0.1。' });
         var agent = field('订阅下载 User-Agent', s.userAgent);
         function card(title, children) { return E('section', { 'class': 'fii-card' }, [E('h3', {}, title)].concat(children)); }
         var lanOptions = E('div', {}, [interfaces.node, E('h4', {}, '访问控制'), lanAcl.node]);
@@ -1176,8 +1399,7 @@ return view.extend({
             E('div', { 'class': 'fii-settings-grid' }, [tcpPorts.node, udpPorts.node]), E('div', { 'class': 'fii-settings-grid' }, [dscp.node, marks.node]), bypass.node])]);
         var miscPanel = E('div', {}, [card('保留地址', [E('p', { 'class': 'fii-muted' }, '保留地址直接连接，Fake-IP 地址仍按代理规则处理。'), E('div', { 'class': 'fii-settings-grid' }, [reserved4.node, reserved6.node])]),
             card('TUN 接口等待', [E('p', { 'class': 'fii-muted' }, '设置路由器等待接口就绪的时间。Mihomo 的 TUN 协议栈与 MTU 在覆写中配置。'), E('div', { 'class': 'fii-settings-grid' }, [tunTimeout.node, tunInterval.node])])]);
-        var servicePanel = E('div', {}, [card('启动与更新', [boot.node, auto.node]), card('连接与端口', [
-            E('details', {}, [E('summary', {}, '路由器接入端口与控制器'), E('p', { 'class': 'fii-muted' }, '这些端口与密钥用于 FII 接入 Mihomo，生成运行配置时统一适配。'), E('div', { 'class': 'fii-settings-grid' }, Object.keys(ports).map(function(k) { return ports[k].node; })), secret.node]), agent.node])]);
+        var servicePanel = E('div', {}, [card('启动与更新', [boot.node, auto.node]), card('订阅下载', [agent.node])]);
         var proxyPanel = E('div', {}, panels);
         var backups = card('备份与迁移', [E('p', {}, '导入 FII 或 SubConverter Flutter 备份，迁移订阅、覆写和输出，保留当前路由器设置。'), actions([
             button('导出备份', async function() { var r = await call('export'); download('fii-backup.json', JSON.stringify(r.data, null, 2)); }),
@@ -1226,8 +1448,7 @@ return view.extend({
                     interfaces: interfaces.read(), ipv6: ipv6.read(), dnsHijack: dns.read(),
                     lanProxy: lan.read(), routerProxy: router.read(), udpProxy: udpMode.read() !== 'off', routerDnsHijack: routerDns.read(), dnsIpv6Hijack: dns6.read(),
                     lanRules: lanAcl.read(), routerRules: routerAcl.read(),
-                    autostart: boot.read(), autoApply: auto.read(), bypass: bypass.read(), secret: secret.read(), userAgent: agent.read() });
-                Object.keys(ports).forEach(function(k) { settings[k] = ports[k].read(); });
+                    autostart: boot.read(), autoApply: auto.read(), bypass: bypass.read(), userAgent: agent.read() });
                 var changedSettings = {};
                 Object.keys(settings).forEach(function(key) {
                     if (JSON.stringify(settings[key]) !== JSON.stringify(self.data.settings[key])) changedSettings[key] = settings[key];

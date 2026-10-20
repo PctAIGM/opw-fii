@@ -6,6 +6,7 @@ import re
 import subprocess
 import time
 from urllib.parse import quote
+from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from .model import check, defaults
@@ -60,12 +61,16 @@ def overlay(body, settings, warnings=None):
                 "external-controller-pipe", "external-ui", "external-ui-url", "external-ui-name",
                 "authentication", "lan-allowed-ips", "lan-disallowed-ips"):
         root.pop(key, None)
-    root.update({"mixed-port": 0, "redir-port": settings["redirPort"] if protocols["tcp"] == "redirect" else 0,
-                 "tproxy-port": settings["tproxyPort"] if "tproxy" in protocols.values() else 0, "allow-lan": True, "bind-address": "*",
+    def prefer(key, value):
+        # Router settings act as defaults; an explicit override value always wins.
+        root.setdefault(key, value)
+    root.update({"mixed-port": 0, "allow-lan": True, "bind-address": "*",
                  "listeners": [{"name": "fii-mixed", "type": "mixed", "listen": "127.0.0.1", "port": settings["mixedPort"]}],
-                 "external-controller": "127.0.0.1:%d" % settings["controllerPort"],
-                 "secret": settings["secret"],
                  "routing-mark": BYPASS_MARK})
+    prefer("redir-port", settings["redirPort"] if protocols["tcp"] == "redirect" else 0)
+    prefer("tproxy-port", settings["tproxyPort"] if "tproxy" in protocols.values() else 0)
+    prefer("external-controller", controller_listen(settings))
+    prefer("secret", settings["secret"])
     tun_options = root.setdefault("tun", {})
     check(isinstance(tun_options, dict), "tun 覆写必须是对象")
     tun_options.update({"enable": tun, "device": "fii-tun", "auto-route": False, "auto-redirect": False,
@@ -80,7 +85,7 @@ def overlay(body, settings, warnings=None):
         settings[scope + 'Proxy'] and settings['dnsHijack' if scope == 'lan' else 'routerDnsHijack'] and
         any(rule['enabled'] and rule['dns'] for rule in rules(settings, scope)) for scope in ('lan', 'router'))
     check(dns['enable'] or not intercepted, 'Mihomo 配置已关闭 DNS；请在覆写中启用 dns.enable，或在路由器设置中关闭 DNS 接管')
-    if dns['enable']:
+    if dns['enable'] and not dns.get('listen'):
         dns['listen'] = '[::]:%d' % settings['dnsPort'] if settings['ipv6'] or 'ipv6' in dns_families(settings) else '0.0.0.0:%d' % settings['dnsPort']
         if settings['mode'] == 'core':
             dns['listen'] = ('[::1]:%d' if settings['ipv6'] else '127.0.0.1:%d') % settings['dnsPort']
@@ -105,6 +110,43 @@ def overlay(body, settings, warnings=None):
     return dump(root)
 
 
+def reconcile(settings, body):
+    """Adopt the effective values from the rendered config.
+
+    Router settings seed the config as defaults while explicit overrides win.
+    Firewall interception and FII's management client must follow what is
+    actually in effect, so ports, the controller endpoint and the secret are
+    read back from the final document.
+    """
+    final = load_map(body)
+    result = copy.deepcopy(settings)
+    for target, key in (("tproxyPort", "tproxy-port"), ("redirPort", "redir-port")):
+        value = final.get(key)
+        check(value is None or (type(value) is int and 0 <= value <= 65535), key + " 必须是 0–65535 的端口号")
+        if value:
+            result[target] = value
+    dns_block = final.get("dns")
+    listen = dns_block.get("listen") if isinstance(dns_block, dict) else None
+    if isinstance(listen, str) and listen:
+        port = listen.rsplit(":", 1)[-1]
+        check(port.isdigit() and 1 <= int(port) <= 65535, "dns.listen 必须以有效端口结尾")
+        result["dnsPort"] = int(port)
+    endpoint = final.get("external-controller")
+    if isinstance(endpoint, str) and endpoint:
+        host, _, port = endpoint.rpartition(":")
+        host = host.strip("[]")
+        check(port.isdigit() and 1 <= int(port) <= 65535, "external-controller 必须以有效端口结尾")
+        result["controllerPort"] = int(port)
+        if host and host != "*":
+            result["controllerAddress"] = host
+        elif host == "*":
+            result["controllerAddress"] = "0.0.0.0"
+    secret = final.get("secret")
+    if isinstance(secret, str):
+        result["secret"] = secret
+    return result
+
+
 def nftables(settings, config=None):
     from .proxy_nft import generate
     return generate(settings, config)
@@ -115,12 +157,25 @@ def active():
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+def controller_listen(settings):
+    """Bind form for the Mihomo external-controller option (IPv6 gets brackets)."""
+    address = settings.get("controllerAddress") or "127.0.0.1"
+    return ("[%s]" % address if ":" in address else address) + ":%d" % settings["controllerPort"]
+
+
+def controller_host(settings):
+    """Connect form for local probes: wildcard binds are reached over loopback."""
+    address = settings.get("controllerAddress") or "127.0.0.1"
+    address = "127.0.0.1" if address in ("0.0.0.0", "::") else address
+    return "[%s]" % address if ":" in address else address
+
+
 def ready(bundle=None):
     bundle = bundle or active()
     if not bundle:
         return False
     settings = bundle["settings"]
-    req = Request("http://127.0.0.1:%d/version" % settings["controllerPort"],
+    req = Request("http://%s:%d/version" % (controller_host(settings), settings["controllerPort"]),
                   headers={"Authorization": "Bearer " + settings["secret"]})
     try:
         with build_opener(ProxyHandler({})).open(req, timeout=1) as response:
@@ -134,13 +189,15 @@ def controller(path, payload=None, *, method=None, timeout=4):
     check(bundle is not None and ready(bundle), "Mihomo 尚未运行")
     settings = bundle["settings"]
     content = json.dumps(payload).encode() if payload is not None else None
-    req = Request("http://127.0.0.1:%d%s" % (settings["controllerPort"], path), data=content,
+    req = Request("http://%s:%d%s" % (controller_host(settings), settings["controllerPort"], path), data=content,
                   headers={"Authorization": "Bearer " + settings["secret"], "Content-Type": "application/json"},
                   method=method or ("PUT" if payload is not None else "GET"))
     try:
         with build_opener(ProxyHandler({})).open(req, timeout=timeout) as response:
             body = response.read(2 * 1024 * 1024)
             return json.loads(body) if body else {}
+    except HTTPError as exc:
+        raise ValueError('Mihomo 控制器请求失败（HTTP %d），请查看内核日志' % exc.code) from None
     except (OSError, ValueError):
         raise ValueError("Mihomo 控制器请求失败，请检查服务状态") from None
 
@@ -431,7 +488,8 @@ def activate(output_id):
         core_test(body)
         previous = active()
         was_active = service_active()
-        bundle = {"outputId": output_id, "name": rendered["name"], "settings": copy.deepcopy(data["settings"]),
+        # Effective values follow the rendered config: explicit overrides won.
+        bundle = {"outputId": output_id, "name": rendered["name"], "settings": reconcile(data["settings"], body),
                   "yaml": body, "appliedAt": int(time.time()), "revision": data["revision"]}
         if previous:
             write_json(rooted("/etc/fii/active.previous.json"), previous)

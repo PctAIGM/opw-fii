@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fii
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=29
+PKG_RELEASE:=39
 PKG_LICENSE:=GPL-3.0-or-later
 PKGARCH:=all
 
@@ -29,9 +29,22 @@ define Package/fii/install
 	find $(1)/usr/lib/fii -name '__pycache__' -type d -exec rm -rf {} +
 endef
 
+define Package/fii/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ]; then
+	/bin/sh /etc/uci-defaults/90-fii && rm -f /etc/uci-defaults/90-fii
+	if [ -f /tmp/fii-was-running ]; then
+		rm -f /tmp/fii-was-running
+		/etc/init.d/fii start || true
+	fi
+fi
+exit 0
+endef
+
 define Package/fii/prerm
 #!/bin/sh
 if [ -z "$${IPKG_INSTROOT}" ]; then
+	[ -e /tmp/fii/ready ] && touch /tmp/fii-was-running
 	/etc/init.d/fii stop
 	/etc/init.d/fii disable
 	sed -i '/# fii-refresh$$$$/d' /etc/crontabs/root

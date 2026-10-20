@@ -25,13 +25,14 @@ const rpc = {declare: spec => async payload => {
   return response.json();
 }};
 const ui = {
-  showModal(title, children, klass) {
+  showModal(title, children, klass, extraClass) {
     this.hideModal();
     const heading = E('h4', {id:'modal-title'}, title);
-    const overlay = E('div', {class:'modal-overlay'}, E('div', {class:'modal ' + (klass || ''),role:'dialog','aria-modal':'true','aria-labelledby':'modal-title'}, [heading,children]));
+    const overlay = E('div', {class:'modal-overlay'}, E('div', {class:['modal',klass,extraClass].filter(Boolean).join(' '),role:'dialog','aria-modal':'true','aria-labelledby':'modal-title'}, [heading,children]));
     document.body.appendChild(overlay);
+    document.body.classList.add('modal-overlay-active');
   },
-  hideModal() { document.querySelector('.modal-overlay')?.remove(); },
+  hideModal() { document.querySelector('.modal-overlay')?.remove(); document.body.classList.remove('modal-overlay-active'); },
   addNotification(_, content, tone) {
     const notification = E('div',{class:'toast ' + (tone === 'error' ? 'error' : ''),role:'status'},content);
     document.body.appendChild(notification); setTimeout(()=>notification.remove(),5000);

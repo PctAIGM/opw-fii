@@ -21,10 +21,11 @@ class LogSnapshotTests(unittest.TestCase):
         path = rooted('/tmp/fii/prepare.log')
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'configuration check failed\n')
-        with patch.object(cli, 'run', return_value='service record') as run:
+        record = 'Tue Oct 20 12:00:00 2026 daemon.err core-run[123]: startup failed\n'
+        with patch.object(cli, 'run', return_value=record) as run:
             result = cli.dispatch('logs', {})
-        run.assert_called_once_with(['/sbin/logread', '-e', r' (fii(-prepare)?|mihomo)(\[[0-9]+\])?:', '-l', '500'], timeout=4)
-        self.assertEqual(result, {'text': 'service record', 'prepareText': 'configuration check failed\n', 'limit': 500, 'truncated': False})
+        run.assert_called_once_with(['/sbin/logread', '-e', r'^\(fii\|fii-prepare\|mihomo\|core-run\)\(\[[0-9][0-9]*\]\)\{0,1\}:', '-l', '500'], timeout=4)
+        self.assertEqual(result, {'text': record, 'prepareText': 'configuration check failed\n', 'limit': 500, 'truncated': False})
 
     def test_byte_limits_keep_complete_utf8_lines_and_missing_prepare_is_empty(self):
         path = rooted('/tmp/fii/prepare.log')

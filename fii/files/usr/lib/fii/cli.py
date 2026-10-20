@@ -65,10 +65,10 @@ def prepare():
     from .runtime import prepare as operation
     return operation()
 
-READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "core_info", "core_check", "network", "transfer_read")
-WRITE_METHODS = ("save", "refresh", "apply", "service", "import", "import_preview", "select", "core_update", "core_channel",
+READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "resources", "core_info", "core_check", "network", "transfer_read")
+WRITE_METHODS = ("save", "refresh", "apply", "service", "import", "import_preview", "select", "resource_update", "core_update", "core_channel",
                  "transfer_begin", "transfer_append", "transfer_invoke", "transfer_release", "transfer_status")
-LONG_METHODS = ("refresh", "apply", "service", "core_update", "core_check", "import", "import_preview", "save", "preview")
+LONG_METHODS = ("refresh", "apply", "service", "resource_update", "core_update", "core_check", "import", "import_preview", "save", "preview")
 
 
 def background(method, payload):
@@ -130,7 +130,7 @@ def run_job(method, ident, payload=None):
             from .core import install_core
             operation = install_core(payload.get("channel"), payload.get("digest"), progress)
         else:
-            operation = dispatch(method, payload, progress=progress) if method == 'preview' else dispatch(method, payload)
+            operation = dispatch(method, payload, progress=progress) if method in ('preview', 'resource_update') else dispatch(method, payload)
         result = {"done": True, "ok": True, "result": operation}
     except Exception as exc:
         result = {"done": True, "ok": False, "error": str(exc)[:3000]}
@@ -325,7 +325,7 @@ def dispatch(method, payload=None, progress=None):
             if job.get('done') or remaining <= 0:
                 break
             time.sleep(min(0.025, remaining))
-        limit = 900 if job.get("method") == "core_update" else 180
+        limit = 900 if job.get("method") in ("core_update", "resource_update") else 180
         if not job.get("done") and time.time() - job["createdAt"] > limit:
             return {"done": True, "ok": False, "error": "任务未完成，请刷新页面并查看日志"}
         return job
@@ -349,12 +349,19 @@ def dispatch(method, payload=None, progress=None):
     if method == "groups":
         from .runtime import groups
         return groups()
+    if method == 'resources':
+        from .resources import view
+        return view()
+    if method == 'resource_update':
+        from .resources import update
+        return update(payload.get('kind'), payload.get('name'), progress)
     if method == "select":
         from .runtime import select_proxy
         return select_proxy(payload.get("group"), payload.get("name"), payload.get('action', 'select'))
     if method == "logs":
         # Match service tags, not cron commands / URLs which happen to contain fii.
-        output = run(["/sbin/logread", "-e", r" (fii(-prepare)?|mihomo)(\[[0-9]+\])?:", "-l", "500"], timeout=4)
+        # ubox filters the raw message (starting with its tag), using POSIX BRE.
+        output = run(["/sbin/logread", "-e", r"^\(fii\|fii-prepare\|mihomo\|core-run\)\(\[[0-9][0-9]*\]\)\{0,1\}:", "-l", "500"], timeout=4)
         clipped = len(output.encode('utf-8')) > 98304
         if clipped:
             output = output.encode('utf-8')[-98304:].decode('utf-8', 'replace').partition('\n')[2]

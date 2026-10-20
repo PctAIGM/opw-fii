@@ -162,11 +162,15 @@ class OverrideWorkflowTests(unittest.TestCase):
         cfg = render.load_map(runtime.overlay(body, model.defaults()['settings'], warnings=warnings))
         self.assertFalse(cfg['tun']['enable'])
         self.assertFalse(cfg['tun']['auto-route'])
-        self.assertEqual(cfg['external-controller'], '127.0.0.1:9090')
         self.assertEqual(cfg['dns']['enhanced-mode'], 'redir-host')
-        for key in ('secret', 'external-controller', 'tun.enable', 'tun.auto-route', 'dns.listen'):
-            self.assertIn(key, warnings[0])
-        self.assertNotIn('dns.enhanced-mode', warnings[0])
+        # Explicit override values win over the FII defaults.
+        self.assertEqual(cfg['external-controller'], '0.0.0.0:8888')
+        self.assertEqual(cfg['secret'], 'private-script-secret')
+        self.assertEqual(cfg['dns']['listen'], ':53')
+        self.assertIn('tun.enable', warnings[0])
+        self.assertIn('tun.auto-route', warnings[0])
+        for key in ('secret', 'external-controller', 'dns.listen', 'dns.enhanced-mode'):
+            self.assertNotIn(key, warnings[0])
         self.assertNotIn('private-script-secret', warnings[0])
 
     def test_invalid_tun_and_profile_objects_fail_instead_of_discarding_override(self):

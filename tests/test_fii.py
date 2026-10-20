@@ -509,22 +509,76 @@ class NetworkGenerationTests(unittest.TestCase):
         for key, value in [("routerProxy", 1), ("udpProxy", "true"), ("lanAccess", ['1.1.1.1; flush ruleset']),
                            ("routerBypassUsers", ["root"]), ("routerBypassUsers", ["4294967295"]),
                            ("dnsMode", "unknown"), ("defaultNameservers", ["dns.example.com"]),
-                           ("localDns", "127.0.0.1:1053"), ("interfaces", ["lo"])]:
+                           ("localDns", "127.0.0.1:1053"), ("interfaces", ["lo"]),
+                           ("controllerAddress", "192.168.1.1:9090"), ("controllerAddress", "router.lan"),
+                           ("controllerAddress", 9090)]:
             with self.subTest(key=key, value=value):
                 data = sample()
                 data["settings"][key] = value
                 with self.assertRaises(ValueError):
                     model.validate(data)
 
+    def test_controller_listen_address_follows_settings(self):
+        for address, expected in [("127.0.0.1", "127.0.0.1:9090"), ("0.0.0.0", "0.0.0.0:9090"),
+                                  ("192.168.1.1", "192.168.1.1:9090"), ("::", "[::]:9090"),
+                                  ("fd00::1", "[fd00::1]:9090")]:
+            with self.subTest(address=address):
+                settings = dict(model.defaults()["settings"], controllerAddress=address)
+                config = render.load_map(runtime.overlay("", settings))
+                self.assertEqual(config["external-controller"], expected)
+                self.assertEqual(runtime.controller_host(settings),
+                                 "[fd00::1]" if address == "fd00::1" else
+                                 ("127.0.0.1" if address in ("0.0.0.0", "::") else address))
+        legacy = dict(model.defaults()["settings"])
+        legacy.pop("controllerAddress")
+        data = sample()
+        data["settings"].pop("controllerAddress", None)
+        model.validate(data)
+        self.assertEqual(data["settings"]["controllerAddress"], "127.0.0.1")
+
     def test_runtime_owns_integration_fields_after_overrides(self):
         settings = model.defaults()["settings"]
         config = render.load_map(runtime.overlay("tun: {enable: true}\nlisteners: []\nrouting-mark: 1\nexternal-controller: 0.0.0.0:8888\n", settings))
         self.assertFalse(config["tun"]["enable"])
         self.assertEqual(config["routing-mark"], 0xF100)
-        self.assertEqual(config["external-controller"], "127.0.0.1:9090")
         self.assertEqual(config["listeners"][0]["listen"], "127.0.0.1")
         self.assertEqual(config["dns"]["proxy-server-nameserver"], config["dns"]["nameserver"])
         self.assertEqual(config["dns"]["nameserver-policy"]["+.lan"], ["127.0.0.1:53"])
+        # An explicit override endpoint wins; absent fields fall back to defaults.
+        self.assertEqual(config["external-controller"], "0.0.0.0:8888")
+        config = render.load_map(runtime.overlay("", settings))
+        self.assertEqual(config["external-controller"], "127.0.0.1:9090")
+        self.assertEqual(config["tproxy-port"], settings["tproxyPort"])
+
+    def test_controller_secret_has_no_minimum_length(self):
+        for value in ("", "short", "1234"):
+            with self.subTest(value=value):
+                data = sample()
+                data["settings"]["secret"] = value
+                model.validate(data)
+        settings = model.defaults()["settings"]
+        self.assertEqual(runtime.reconcile(settings, "secret: ''\n")["secret"], "")
+
+    def test_effective_values_follow_explicit_overrides(self):
+        settings = model.defaults()["settings"]
+        body = ("external-controller: 192.168.1.1:9443\nsecret: override-secret-123456\n"
+                "tproxy-port: 12345\nredir-port: 12346\ndns: {enable: true, listen: \":5353\"}\n")
+        effective = runtime.reconcile(settings, body)
+        self.assertEqual(effective["controllerPort"], 9443)
+        self.assertEqual(effective["controllerAddress"], "192.168.1.1")
+        self.assertEqual(effective["secret"], "override-secret-123456")
+        self.assertEqual(effective["tproxyPort"], 12345)
+        self.assertEqual(effective["redirPort"], 12346)
+        self.assertEqual(effective["dnsPort"], 5353)
+        effective = runtime.reconcile(settings, "external-controller: '[::1]:9091'\n")
+        self.assertEqual(effective["controllerAddress"], "::1")
+        self.assertEqual(effective["controllerPort"], 9091)
+        effective = runtime.reconcile(settings, "")
+        for key in ("controllerPort", "controllerAddress", "secret", "tproxyPort", "redirPort", "dnsPort"):
+            self.assertEqual(effective[key], settings[key])
+        for body in ("tproxy-port: seven\n", "external-controller: no-port\n", "dns: {listen: ':bad'}\n"):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                runtime.reconcile(settings, body)
 
     def test_firewall_only_intercepts_selected_lan(self):
         settings = model.defaults()["settings"]

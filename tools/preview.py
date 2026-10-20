@@ -62,7 +62,7 @@ class Handler(SimpleHTTPRequestHandler):
                           "architecture": "预览目标：Linux x86_64"}
             elif method == "groups":
                 result = {"groups": []}
-            elif method in ("apply", "service", "refresh", "select", "core_update"):
+            elif method in ("apply", "service", "refresh", "select", "resource_update", "core_update"):
                 raise ValueError("本地预览不执行路由器操作。配置编辑、导入与输出预览使用真实后端。")
             elif method == "logs":
                 result = {"text": "本地预览没有 OpenWrt 日志。"}

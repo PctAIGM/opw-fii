@@ -9,7 +9,7 @@ from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.1-29"
+VERSION = "0.1.1-39"
 EPOCH = 1792339200  # 2026-10-19 00:00 UTC, deterministic archive timestamps.
 
 
@@ -85,10 +85,16 @@ def main():
     postinst = b'''#!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
 /bin/sh /etc/uci-defaults/90-fii && rm -f /etc/uci-defaults/90-fii
+# prerm also runs on upgrades; restore a service that was running before it.
+if [ -f /tmp/fii-was-running ]; then
+    rm -f /tmp/fii-was-running
+    /etc/init.d/fii start || true
+fi
 exit 0
 '''
     prerm = b'''#!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
+[ -e /tmp/fii/ready ] && touch /tmp/fii-was-running
 /etc/init.d/fii stop
 /etc/init.d/fii disable
 sed -i '/# fii-refresh$/d' /etc/crontabs/root
@@ -115,8 +121,8 @@ exit 0
 '''
     manifest.append(build("luci-app-fii", luci_entries, "fii, luci-base, cgi-io", controls=[("postinst", luci_postinst, 0o755)]))
     manifest_path = ROOT / "dist/manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    (ROOT / "dist/SHA256SUMS").write_text("".join(item["sha256"] + "  " + item["file"] + "\n" for item in manifest), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
+    (ROOT / "dist/SHA256SUMS").write_text("".join(item["sha256"] + "  " + item["file"] + "\n" for item in manifest), encoding="utf-8", newline="\n")
     print(json.dumps(manifest, indent=2))
 
 

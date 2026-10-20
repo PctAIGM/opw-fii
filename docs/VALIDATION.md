@@ -2,6 +2,59 @@
 
 Target requested by the user: **OpenWrt 24.10.8 / Intel J4125 / x86_64**.
 
+## Running core log read fix: 0.1.1-39 (2026-10-20)
+
+On the physical router, the installed `luci.fii logs` RPC returned zero records while Mihomo was running and the system ring buffer contained hundreds of `core-run[PID]` records. Two assumptions in the old filter were wrong: ubox `logread -e` compiles a basic regular expression (`REG_NOSUB`, without `REG_EXTENDED`), and applies it to the raw tag-prefixed message before formatting its timestamp/facility. The old extended-expression syntax and leading space therefore matched nothing. The filter also omitted the `core-run` tag used by procd for the wrapper's inherited stdout/stderr. Earlier mock query assertions and stopped-core browser validation did not expose these faults.
+
+Both Python fallback and native ucode now use an anchored BRE for the exact `fii`, `fii-prepare`, `mihomo` and `core-run` tags, with an optional numeric PID. Unrelated cron/access records containing FII paths remain excluded. The frontend recognizes `core-run` as a core source even when startup errors lack embedded logfmt/JSON levels. Existing log size bounds, preparation snapshot separation and error propagation are retained. The command examines the system buffer's last 500 messages before filtering, as ubox implements `-l`; it does not guarantee 500 matching service records.
+
+Validation passed:
+
+- All **203 Python tests**, JavaScript syntax and the actual parser check (`tools/verify_log_parser.cjs`), including raw startup errors, logfmt/JSON severity and application/preparation separation.
+- The candidate passed all **18 isolated native ucode checks** on the actual router. The candidate Python query passed the router's real BRE engine with **8 accepted tag/PID forms and 9 excluded unrelated/invalid messages** (`tools/verify_log_filter.py`). These fixtures use temporary roots and do not apply/start a core or inject syslog messages.
+- Three normalized candidate files were compared against the installed 0.1.1-38 originals; reversing only this fix reproduced all three original SHA-256 hashes. Originals were backed up under `/tmp/fii-logfix-20261020-puqqfdsu/backup`, then the files were atomically replaced and rpcd reloaded. The real RPC returned **443 records / 441 core records / 90,478 bytes**, without truncation. Mihomo PID stayed **17317** and the state, active snapshot, runtime YAML, core binary, init script and wrapper hashes were unchanged across deployment.
+- A fresh headless Chrome login using the router's installed assets displayed **433 records / 431 core records / 2 application records** in a later snapshot. Core/application filtering, literal search/clear, pause, transfer cleanup and a 390px viewport passed. No page errors or disallowed RPCs occurred. It used no candidate asset routes and performed no service start/stop/apply. Counts naturally vary as the ring buffer advances. Evidence contains counts/hashes, not raw traffic logs or credentials: `build/log-fix/live-ui-result.json`.
+- Both application-only **0.1.1-39** IPKs passed package inspection. The physical router received the minimal three-file hotfix; its package database still reports **0.1.1-38**. A complete 0.1.1-39 package upgrade was not performed on the running router.
+
+The hotfix does not require a Mihomo restart. Existing browser tabs should reload their cached LuCI view (Ctrl+F5). The backup is in `/tmp` and will disappear on reboot; the corrected program files persist and the 0.1.1-39 packages contain the same fix.
+
+## Global compact UI: 0.1.1-38 (2026-10-20)
+
+All eight pages now share a compact administration layout: desktop body text is 13px, regular controls are about 32px high, cards have 12px padding, form fields have 10px bottom spacing, and the header/navigation no longer reserve a large introductory area. The original palette, status distinctions, labels and keyboard focus indicators are retained. Wide subscription layouts use three columns where the available width permits; port settings use three columns. Override metadata and collapsed summary share a line, with actions aligned to the right on wider screens. GEO resources occupy four columns on wide screens, source addresses expand on demand, rulesets use aligned compact rows, and log rows use less vertical space. Proxy tiles are 56px high; virtual scrolling and keyboard row calculations use a matching 64px pitch.
+
+The isolated browser comparison uses identical data at **1440x900**: nine subscriptions, twelve overrides, eight outputs, six proxy groups and twelve rulesets. Measurements describe the FII root height, not a physical router/theme guarantee:
+
+| Page | Before / after FII height | Reduction |
+| --- | ---: | ---: |
+| Overview | 847 / 460 px | 46% |
+| Subscriptions | 1783 / 729 px | 59% |
+| Mihomo | 1416 / 806 px | 43% |
+| Overrides | 3262 / 1148 px | 65% |
+| Outputs | 1598 / 939 px | 41% |
+| Router settings, proxy section | 1004 / 563 px | 44% |
+| Control panel | 2842 / 1394 px | 51% |
+| Logs | 1080 / 851 px | 21% |
+
+Fully visible subscription entries increased from **2 to 9**, overrides from **2 to 8**, and outputs from **2 to 6** in this fixture. Log row height changed from 39px to 27px. Results and before/after screenshots are under `build/ui-density/`, with exact measurements in `results.json`.
+
+`tools/verify_density_ui.cjs` checks every page at 1440, 1024, 768 and 390px, every router-settings subsection, subscription/output editor overflow, expanded override summaries, dark mode, the 512-node proxy list's last item and Home navigation, and node geometry. It also emulates a mobile touch device: ordinary buttons retain at least 44px hit areas, mobile editor inputs use 16px text, and proxy modal tiles remain 56px high without overflow. No browser errors or mutation requests occurred. The local preview shim now carries both modal style classes and modal-open state so proxy-modal tests exercise the relevant scoped CSS.
+
+All **203 Python tests**, the resource-update browser regression, JavaScript syntax checks and `git diff --check` passed. Both application-only **0.1.1-38 / all** IPKs passed archive/payload/CSS-hash inspection. Previous 0.1.1-37 packages are retained in `build/packages-before-density/`. This turn did not install packages on a router or validate the new layout under a live LuCI theme; all new browser evidence uses the local fixture.
+
+## Control panel and core resource updates: 0.1.1-37 (2026-10-20)
+
+The former proxy-groups tab is now **控制面板**, retaining the `#proxies` deep link and all group controls. Its new external-resource section shows local GEOSITE / GEOIP / ASN / MMDB file presence, size and modification time, applied GEO mode/automatic-update settings, and sanitized configured source URLs. File discovery follows Mihomo's case-insensitive aliases, including `Country.mmdb`, `geoip.db`, and `geoip.metadb`.
+
+The GEO action uses Mihomo's [POST /configs/geo implementation](https://github.com/MetaCubeX/mihomo/blob/Meta/hub/route/configs.go) and its [enabled-database updater](https://github.com/MetaCubeX/mihomo/blob/Meta/component/updater/update_geo.go). It updates the databases enabled by the core, selecting GEOIP or MMDB according to geodata mode. It does not promise to download all four files or roll back a partially successful multi-file update. Runtime rulesets come from the core's [GET /providers/rules and PUT /providers/rules/{name} API](https://github.com/MetaCubeX/mihomo/blob/Meta/hub/route/provider.go), rather than the editable configuration library. HTTP resources can update, File resources can reload, and Inline resources are read-only. Stopped cores expose only an explicitly labeled applied snapshot and reject every update. A failed runtime-provider read remains an error rather than silently substituting a stale snapshot.
+
+Read and write RPC ACLs are separate. Updates run as polled background jobs, validate the current provider's existence/type, URL-encode its name, and share the service-operation lock with apply/restart/core replacement. They do not restart Mihomo or write the configuration library. GEO inspection never opens arbitrary file paths. Resource source display removes URL credentials, query strings and fragments; controller HTTP failures surface a status code without returning a potentially private remote error body.
+
+All **203 Python tests** passed, including nine new resource tests with a real loopback HTTP controller fixture. Coverage includes authenticated verbs/encoded names, stopped-service rejection, current-runtime membership, file aliases/metadata, credential removal, partial read failures, unsupported resource types, failure propagation, and no restart/config mutation. The nine resource tests were rerun after the final metadata-format adjustment and passed. `node --check` passed for the LuCI view and browser driver, and `git diff --check` passed.
+
+`tools/verify_control_panel_ui.cjs` passed isolated headless-Chrome checks for the renamed tab, retained proxy selection, runtime resource rendering, literal HTML-like names, Inline read-only behavior, background progress, disabled duplicate updates, tab navigation during an update, stopped controls after completion, update/read failure recovery, separate GEO/ruleset errors, 390-pixel overflow, dark layout and cleanup. No browser errors occurred. Evidence: `build/performance/control-panel-ui.json` and `control-panel-{desktop,390,dark}.png`. These are simulated-core browser checks, not router runtime verification.
+
+Both application-only **0.1.1-37 / all** IPKs passed `tools/verify_packages.py`, including archive metadata, payload paths/modes, absence of embedded core binaries, and the packaged CSS content hash. Exact sizes and SHA-256 values are in `dist/manifest.json` and `dist/SHA256SUMS`. The earlier 0.1.1-36 packages were preserved under `build/packages-before-control-panel/`. This turn did **not** install packages on a router, run the OpenWrt ucode VM, or trigger actual GEO/ruleset downloads.
+
 ## Dedicated log viewer and native log reads: 0.1.1-29 (2026-10-20)
 
 The [Nikki log page](https://github.com/nikkinikki-org/OpenWrt-nikki/blob/78e1a751d55ed0762811f054ee699049473da7b8/luci-app-nikki/htdocs/luci-static/resources/view/nikki/log.js) was inspected as a reference for separate application/core logs, automatic refresh and scrolling to the bottom. FII now has a dedicated **日志** tab; the overview's existing log button opens that tab. Its source selector, exact level filter, literal case-insensitive search, wrap toggle, pause/resume, follow-latest toggle and export of the filtered raw records work locally. Each record displays its timestamp, textual level, source and message. Logfmt and JSON core levels take precedence over the syslog transport severity. Dynamic messages/timestamps use text nodes so log text is never interpreted as HTML. Scoped level classes avoid theme-wide `.warning`/`.error` formatting. Desktop/mobile and dark layouts use existing FII tokens and no new dependencies.

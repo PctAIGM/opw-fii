@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Loaded once inside rpcd. No shell interpolation, blocking subprocesses or locks.
+// Loaded once inside rpcd. No shell interpolation, blocking subprocesses or
+// locks: helper processes go through asynchronous file.exec calls and every
+// contended lock falls back to the validated Python worker.
 import * as fs from 'fs';
 import { timer } from 'uloop';
 
@@ -17,7 +19,7 @@ const digitsPattern = /^[0-9]+$/;
 const spacePattern = /\s+/;
 const cgroupPattern = /^[A-Za-z0-9_:@.-]{1,64}$/;
 const methods = ['get', 'status', 'save', 'refresh', 'preview', 'apply', 'service', 'export', 'import',
-    'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'core_info', 'core_check', 'core_update',
+    'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'resource_update', 'core_info', 'core_check', 'core_update',
     'core_channel', 'network', 'transfer_begin', 'transfer_append', 'transfer_invoke', 'transfer_read',
     'transfer_release', 'transfer_status'];
 let documents = {}, coreCache = null, nextWait = 0, waits = {};
@@ -56,11 +58,11 @@ function id(value) {
     check(type(value) == 'string' && match(value, idPattern), '传输或任务 ID 无效');
     return value;
 }
-function locked(action) {
+function locked(action, kind) {
     fs.mkdir(path('/tmp/fii'), 0700);
     fs.mkdir(path('/tmp/fii/transfers'), 0700);
     fs.mkdir(path('/var/lock'), 0755);
-    let fd = fs.open(path('/var/lock/fii-transfers.lock'), 'a', 0600);
+    let fd = fs.open(path('/var/lock/fii-' + (kind || 'transfers') + '.lock'), 'a', 0600);
     check(fd, fallback);
     try {
         check(fd.lock('xn'), fallback);
@@ -82,18 +84,33 @@ function reserve(size) {
     }
     check(used + size <= 64 * 1024 * 1024 && count < 64, '临时传输空间已满，请稍后重试');
 }
+function token() {
+    let random = fs.open('/dev/urandom', 'r');
+    check(random, fallback);
+    let ident;
+    try { ident = hexenc(random.read(16)); random.close(); }
+    catch (e) { random.close(); die(e); }
+    return id(ident);
+}
+function discard(name) { try { fs.unlink(path(name)); } catch (e) {} }
+function replace(name, text) {
+    let target = path(name), temp = target + '.tmp-' + token();
+    let fd = fs.open(temp, 'wx', 0600);
+    check(fd, fallback);
+    try {
+        check(fd.write(text) == length(text), fallback);
+        fd.close();
+        fs.rename(temp, target);
+    }
+    catch (e) { fd.close(); fs.unlink(temp); die(e); }
+}
 function response(result, chunk) {
     let value = { ok: true, result }, text = sprintf('%J', value);
     if (length(text) <= 2048 || (chunk && length(text) <= 32768)) return value;
     check(length(text) <= limit, '响应超过传输限制');
     return locked(function() {
         reserve(length(text));
-        let random = fs.open('/dev/urandom', 'r');
-        check(random, fallback);
-        let ident;
-        try { ident = hexenc(random.read(16)); random.close(); }
-        catch (e) { random.close(); die(e); }
-        id(ident);
+        let ident = token();
         let name = '/tmp/fii/transfers/' + ident + '.out';
         let fd = fs.open(path(name), 'wx', 0600);
         check(fd, fallback);
@@ -143,15 +160,215 @@ function get(payload) {
 function coreStamp() {
     return [signature('/etc/fii/bin/mihomo'), signature('/etc/fii/core-install.json'), signature('/etc/fii/core-channel.json')];
 }
+function coreLocal(context, done) {
+    // Mirror of the Python core.local_info: version probe plus install metadata.
+    let install = document('/etc/fii/core-install.json', 64 * 1024, true);
+    let selected = document('/etc/fii/core-channel.json', 64 * 1024, true);
+    let info = { installed: false, versionText: '', channel: install.channel || '', version: install.version || '',
+        updatedAt: install.updatedAt ?? null, digest: install.digest || '',
+        selectedChannel: selected.channel ?? (install.channel || 'release'),
+        architecture: 'x86_64 / amd64-compatible', path: '/etc/fii/bin/mihomo', supported: false };
+    function finish(text) {
+        info.versionText = substr(trim(text || ''), 0, 300);
+        info.installed = length(info.versionText) > 0;
+        return context.call('file', 'exec', { command: '/bin/uname', params: ['-m'] }, function(code, reply) {
+            let machine = !code && reply?.code == 0 ? trim(reply.stdout || '') : '';
+            info.supported = machine == 'x86_64' || machine == 'amd64';
+            done(info);
+        });
+    }
+    let binary = fs.stat(path('/etc/fii/bin/mihomo'));
+    if (!(binary?.type == 'file' && (binary.mode & 0x49) != 0)) return finish('');
+    return context.call('file', 'exec', { command: '/etc/fii/bin/mihomo', params: ['-v'] }, function(code, reply) {
+        finish(!code && reply?.code == 0 ? reply.stdout || '' : '');
+    });
+}
 function withCore(context, operation) {
     let stamp = coreStamp();
     if (coreCache && same(coreCache.stamp, stamp)) return operation(coreCache.value);
-    return context.worker('core_info', {}, function(reply) {
-        if (!reply?.ok || !reply.result) { context.reply(reply); return; }
-        if (same(stamp, coreStamp())) coreCache = { stamp, value: reply.result };
-        let result = operation(reply.result);
-        if (type(result) == 'object') context.reply(result);
+    return coreLocal(context, function(core) {
+        if (same(stamp, coreStamp())) coreCache = { stamp, value: core };
+        try {
+            let result = operation(core);
+            if (type(result) == 'object') context.reply(result);
+        }
+        catch (e) { context.reply({ ok: false, error: message(e) }); }
     });
+}
+function urlencode(text) {
+    let out = '';
+    for (let position = 0; position < length(text); position++) {
+        let character = substr(text, position, 1), byte = ord(character);
+        if ((byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a) || (byte >= 0x30 && byte <= 0x39) ||
+            byte == 0x2e || byte == 0x2d || byte == 0x5f || byte == 0x7e) out += character;
+        else out += sprintf('%%%02X', byte);
+    }
+    return out;
+}
+function download(context, url, target, timeout, headers, done) {
+    // uclient-fetch writes to a private file because rpcd caps exec stdout.
+    let params = ['-q', '-O', path(target), '--timeout=' + timeout, '--proxy=off'];
+    for (let header in headers) push(params, '--header=' + header);
+    push(params, url);
+    return context.call('file', 'exec', { command: '/bin/uclient-fetch', params }, function(code, reply) {
+        try { done(code, reply, target); }
+        catch (e) { discard(target); context.reply({ ok: false, error: message(e) }); }
+    });
+}
+function controllerHost(settings) {
+    // Wildcard binds stay reachable through loopback for local probes.
+    let address = settings.controllerAddress || '127.0.0.1';
+    return address == '0.0.0.0' || address == '::' ? '127.0.0.1' : address;
+}
+function controllerUrl(settings, target) {
+    let host = controllerHost(settings);
+    return 'http://' + (index(host, ':') >= 0 ? '[' + host + ']' : host) + ':' + (settings.controllerPort || 9090) + target;
+}
+function controllerReq(context, verb, settings, target, body, timeout, done) {
+    // uclient-fetch cannot issue the PUT/DELETE selection verbs; the node
+    // bridge speaks them over loopback and reports the HTTP status as JSON.
+    let params = ['/usr/libexec/fii/controller-req.cjs', verb, controllerHost(settings),
+        '' + (settings.controllerPort || 9090), settings.secret || '', target, '' + timeout];
+    if (body != null) push(params, body);
+    return context.call('file', 'exec', { command: '/usr/bin/node', params: params }, function(code, reply) {
+        let ok = false;
+        try {
+            let answer = json(reply?.stdout || '');
+            ok = !code && reply?.code == 0 && type(answer) == 'object' && answer.code >= 200 && answer.code < 300;
+        }
+        catch (e) {}
+        try { done(ok); }
+        catch (e) { context.reply({ ok: false, error: message(e) }); }
+    });
+}
+function groupsView(context, done) {
+    let bundle = document('/etc/fii/active.json', limit, true);
+    if (!bundle.outputId || !fs.stat(path('/tmp/fii/ready'))) return done(null);
+    let settings = bundle.settings || {};
+    return download(context, controllerUrl(settings, '/proxies'),
+        '/tmp/fii/groups-' + token() + '.json', 4,
+        ['Authorization: Bearer ' + (settings.secret || '')], function(code, reply, target) {
+            let parsed = null;
+            try { if (!code && reply?.code == 0) parsed = json(read(target, 2 * 1024 * 1024)); }
+            catch (e) {}
+            discard(target);
+            check(parsed && type(parsed) == 'object', 'Mihomo 控制器请求失败，请检查服务状态');
+            check(type(parsed.proxies) == 'object', '代理组响应无效');
+            let result = [], nodes = {};
+            for (let name, value in parsed.proxies) {
+                if (type(value) != 'object') continue;
+                let history = type(value.history) == 'array' ? value.history : [];
+                let last = length(history) && type(history[length(history) - 1]) == 'object' ? history[length(history) - 1] : {};
+                nodes[name] = { type: value.type || '',
+                    alive: type(value.alive) == 'bool' ? value.alive : null,
+                    delay: type(last.delay) == 'int' && last.delay >= 0 && last.delay <= 65535 ? last.delay : null,
+                    testedAt: type(last.time) == 'string' ? last.time : '' };
+                if (type(value.all) == 'array' && name != 'GLOBAL')
+                    push(result, { name: name, type: value.type || '', now: value.now ?? '',
+                        fixed: type(value.fixed) == 'string' ? value.fixed : '',
+                        all: filter(value.all, (item) => type(item) == 'string') });
+            }
+            done({ groups: result, nodes: nodes, running: true, source: 'runtime' });
+        });
+}
+function groupsRpc(context) {
+    return groupsView(context, function(view) {
+        // A stopped core still needs the YAML snapshot only the worker renders.
+        if (!view) return context.worker('groups', {}, context.reply);
+        context.reply(response(view));
+    });
+}
+function selectRpc(payload, context) {
+    let group = payload.group, name = payload.name, action = payload.action ?? 'select';
+    check(type(group) == 'string', '代理组名称必须是文本');
+    check(action == 'select' || action == 'unpin', '代理组操作无效');
+    if (action == 'select') check(type(name) == 'string', '节点名称必须是文本');
+    else check(name == null, '取消钉住不接受节点名称');
+    let bundle = document('/etc/fii/active.json', limit, true);
+    check(bundle.outputId && fs.stat(path('/tmp/fii/ready')), '内核已停止，当前仅展示配置中的代理组');
+    return groupsView(context, function(view) {
+        let available = filter(view.groups, (entry) => entry.name == group)[0];
+        check(available, '代理组不存在');
+        let automatic = available.type == 'URLTest' || available.type == 'Fallback';
+        let target = '/proxies/' + urlencode(group);
+        if (action == 'unpin') {
+            check(automatic, '只有自动测速组和故障转移组支持取消钉住');
+            return controllerReq(context, 'DELETE', bundle.settings, target, null, 4, function(ok) {
+                check(ok, 'Mihomo 控制器请求失败，请检查服务状态');
+                context.reply(response({ message: '已取消钉住，恢复自动选择' }));
+            });
+        }
+        check((available.type == 'Selector' || automatic) && index(available.all, name) >= 0, '代理组不支持选择或节点不存在');
+        // Fallback.Set may synchronously health-check a dead node for up to 5s.
+        return controllerReq(context, 'PUT', bundle.settings, target, sprintf('%J', { name: name }),
+            available.type == 'Fallback' ? 8 : 4, function(ok) {
+                check(ok, 'Mihomo 控制器请求失败，请检查服务状态');
+                context.reply(response({ message: (automatic ? '已钉住 ' : '已切换到 ') + name }));
+            });
+    });
+}
+function channelName(value) {
+    check(value == 'release' || value == 'alpha', '内核渠道必须是 Release 或 Alpha');
+    return value;
+}
+function coreChannel(payload) {
+    let channel = channelName(payload.channel);
+    // The lock name matches the Python worker, so both runtimes exclude each other.
+    return locked(function() {
+        replace('/etc/fii/core-channel.json', sprintf('%J\n', { channel: channel }));
+        return response({ selectedChannel: channel });
+    }, 'core-channel');
+}
+function releaseMetadata(channel, target, code, reply) {
+    if (code || reply?.code != 0) {
+        let text = (reply?.stderr || '') + (reply?.stdout || '');
+        let status = match(text, /HTTP error ([0-9]+)/);
+        if (status) {
+            let http = int(status[1]);
+            die(http == 403 || http == 429 ? 'GitHub 访问受限或达到请求频率限制，请稍后重试'
+                : 'GitHub 下载失败 (HTTP ' + http + ')，当前内核保持不变');
+        }
+        die('无法连接 GitHub (uclient-fetch)，请检查路由器网络后重试');
+    }
+    let info = fs.stat(path(target));
+    check(info?.type == 'file', '无法连接 GitHub (uclient-fetch)，请检查路由器网络后重试');
+    check(info.size <= 4 * 1024 * 1024, 'GitHub 发布信息过大');
+    let release = json(read(target, 4 * 1024 * 1024));
+    check(type(release) == 'object', 'GitHub 发布信息无效');
+    check(!release.draft, 'GitHub 返回了未发布版本');
+    let tag = release.tag_name;
+    if (channel == 'release') check(!release.prerelease && type(tag) == 'string' && match(tag, /^v[0-9]+\.[0-9]+\.[0-9]+$/), 'Release 版本信息无效');
+    else check(tag == 'Prerelease-Alpha' && release.prerelease, 'Alpha 版本信息无效');
+    let asset = 'mihomo-linux-amd64-compatible-' + tag + '.gz';
+    let found = filter(type(release.assets) == 'array' ? release.assets : [], (entry) => type(entry) == 'object' && type(entry.name) == 'string' &&
+        (channel == 'release' ? entry.name == asset : !!match(entry.name, /^mihomo-linux-amd64-compatible-(alpha-[A-Za-z0-9]+)\.gz$/)));
+    check(length(found) == 1, '未找到唯一的官方 amd64-compatible 内核文件');
+    let chosen = found[0];
+    let digest = chosen.digest || '';
+    check(match(digest, /^sha256:[a-fA-F0-9]{64}$/), '官方内核缺少 SHA-256 摘要，未执行下载');
+    check(type(chosen.size) == 'int' && chosen.size > 0 && chosen.size <= 64 * 1024 * 1024, '内核压缩包大小无效');
+    let version = channel == 'release' ? tag : match(chosen.name, /^mihomo-linux-amd64-compatible-(alpha-[A-Za-z0-9]+)\.gz$/)[1];
+    let url = 'https://github.com/MetaCubeX/mihomo/releases/download/' + urlencode(tag) + '/' + chosen.name;
+    check(chosen.browser_download_url == url, '内核下载地址不是预期的官方发布地址');
+    return { channel: channel, version: version, tag: tag, asset: chosen.name,
+        assetId: chosen.id ?? null, size: chosen.size, digest: lc(digest),
+        publishedAt: chosen.updated_at || release.published_at || null,
+        releaseUrl: 'https://github.com/MetaCubeX/mihomo/releases/tag/' + urlencode(tag) };
+}
+function coreCheck(payload, context) {
+    let channel = channelName(payload.channel);
+    return download(context, 'https://api.github.com/repos/MetaCubeX/mihomo/releases/' + (channel == 'release' ? 'latest' : 'tags/Prerelease-Alpha'),
+        '/tmp/fii/core-check-' + token() + '.json', 20,
+        ['User-Agent: FII-Core-Manager/0.1.1', 'Accept: application/vnd.github+json'], function(code, reply, target) {
+            let remote = releaseMetadata(channel, target, code, reply);
+            discard(target);
+            // A cache hit returns synchronously; a miss replies from coreLocal.
+            let result = withCore(context, function(core) {
+                return response({ remote: remote, current: core,
+                    updateAvailable: !core.installed || core.digest != remote.digest || core.channel != channel });
+            });
+            if (type(result) == 'object') context.reply(result);
+        });
 }
 function status(context) {
     let bundle = document('/etc/fii/active.json', limit, true);
@@ -175,7 +392,7 @@ function status(context) {
         let activeStamp = signature('/etc/fii/active.json');
         return context.call('file', 'exec', { command: '/bin/uclient-fetch',
             params: ['-q', '-O', '-', '--timeout=1', '--header=Authorization: Bearer ' + settings.secret,
-                'http://127.0.0.1:' + settings.controllerPort + '/version'] }, function(code, reply) {
+                controllerUrl(settings, '/version')] }, function(code, reply) {
             try { result.running = !code && reply.code == 0 && length(reply.stdout || '') <= 8192 && type(json(reply.stdout || '')) == 'object'; }
             catch (e) { result.running = false; }
             result.running = result.running && !!fs.stat(path('/tmp/fii/ready')) && same(activeStamp, signature('/etc/fii/active.json'));
@@ -190,7 +407,7 @@ function job(payload, context) {
         let value;
         try { value = json(read('/tmp/fii/jobs/' + ident + '.json', limit)); }
         catch (e) { die('任务记录不存在或无法读取，可能路由器已重启'); }
-        if (!value.done && time() - value.createdAt > (value.method == 'core_update' ? 900 : 180))
+        if (!value.done && time() - value.createdAt > (value.method == 'core_update' || value.method == 'resource_update' ? 900 : 180))
             value = { done: true, ok: false, error: '任务未完成，请刷新页面并查看日志' };
         return value;
     }
@@ -304,7 +521,8 @@ function network(context) {
 function logs(context) {
     // Native asynchronous read: opening a log page never spawns the YAML worker.
     return context.call('file', 'exec', { command: '/sbin/logread',
-        params: ['-e', ' (fii(-prepare)?|mihomo)(\\[[0-9]+\\])?:', '-l', '500'] }, function(code, result) {
+        // logread matches the raw tag-prefixed message with POSIX BRE.
+        params: ['-e', '^\\(fii\\|fii-prepare\\|mihomo\\|core-run\\)\\(\\[[0-9][0-9]*\\]\\)\\{0,1\\}:', '-l', '500'] }, function(code, result) {
         if (code || result?.code != 0) {
             context.reply({ ok: false, error: '读取系统日志失败，请稍后重试' }); return;
         }
@@ -333,6 +551,10 @@ function call(method, raw, context) {
     try {
         if (method == 'get') return get(payload);
         if (method == 'core_info') return withCore(context, (value) => response(value));
+        if (method == 'core_channel') return coreChannel(payload);
+        if (method == 'core_check') return coreCheck(payload, context);
+        if (method == 'groups') return groupsRpc(context);
+        if (method == 'select') return selectRpc(payload, context);
         if (method == 'status') return status(context);
         if (method == 'job') return job(payload, context);
         if (method == 'network') return network(context);

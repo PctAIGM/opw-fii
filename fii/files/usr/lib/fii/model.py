@@ -19,6 +19,7 @@ def defaults():
             "interfaces": ["br-lan"], "ipv6": False, "dnsHijack": True,
             "mixedPort": 7890, "redirPort": 7893, "tproxyPort": 7895,
             "dnsPort": 1053, "controllerPort": 9090,
+            "controllerAddress": "127.0.0.1",
             "secret": secrets.token_urlsafe(24), "userAgent": "clash.meta",
             "bypass": [],
             "lanProxy": True, "routerProxy": False, "udpProxy": True,
@@ -157,6 +158,7 @@ def validate(data):
                 "lanAccess", "routerBypassUsers"):
         if key not in settings:
             settings[key] = setting_defaults[key]
+    settings.setdefault("controllerAddress", setting_defaults["controllerAddress"])
     for key in ("autostart", "autoApply", "ipv6", "dnsHijack", "lanProxy", "routerProxy", "udpProxy",
                 "routerDnsHijack", "dnsIpv6Hijack"):
         check(type(settings.get(key)) is bool, key + "必须是布尔值")
@@ -164,6 +166,11 @@ def validate(data):
     ports = [settings.get(k) for k in ("mixedPort", "redirPort", "tproxyPort", "dnsPort", "controllerPort")]
     check(all(type(p) is int and 1024 <= p <= 65535 for p in ports), "端口必须为 1024–65535")
     check(len(set(ports)) == len(ports), "端口不能重复")
+    check(isinstance(settings["controllerAddress"], str), "控制器监听地址必须是 IP 地址")
+    try:
+        ipaddress.ip_address(settings["controllerAddress"])
+    except ValueError:
+        raise ValueError("控制器监听地址必须是 IP 地址") from None
     interfaces = settings.get("interfaces")
     check(isinstance(interfaces, list) and 0 <= len(interfaces) <= 16 and
           all(isinstance(i, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", i) for i in interfaces),
@@ -189,7 +196,8 @@ def validate(data):
     check(isinstance(bypass, list) and len(bypass) <= 256, "绕过网段无效")
     for network in bypass:
         ipaddress.ip_network(network, strict=False)
-    check(len(text(settings.get("secret"), "控制器密钥", 256)) >= 16, "控制器密钥至少 16 字符")
+    # Any value, including empty (no controller authentication), is accepted.
+    text(settings.get("secret"), "控制器密钥", 256)
     text(settings.get("userAgent"), "User-Agent", 512)
     check(not any(c in settings["userAgent"] for c in "\r\n"), "User-Agent 不能换行")
     check(len(json.dumps(data, ensure_ascii=False).encode()) <= MAX_DOCUMENT, "配置超过 16 MiB")
