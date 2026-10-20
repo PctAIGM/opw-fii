@@ -347,7 +347,9 @@ def dispatch(method, payload=None, progress=None):
         from .core import install_core
         return install_core(payload.get("channel"), payload.get("digest"))
     if method == "groups":
-        from .runtime import groups
+        from .runtime import groups, group_order
+        if payload.get('orderOnly'):
+            return {'order': group_order()}
         return groups()
     if method == 'resources':
         from .resources import view

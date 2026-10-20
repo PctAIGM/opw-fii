@@ -43,7 +43,10 @@ const output = path.join(root, 'build/performance');
             else if (method === 'status') result = status();
             else if (method === 'network') result = {};
             else if (method === 'groups') result = {running,source:running ? 'runtime' : 'snapshot',
-                groups:[{name:'PROXY',type:'Selector',now:running ? current : '',all:['HK','JP']}],nodes:{HK:{type:'ss',delay:42},JP:{type:'ss',delay:80}}};
+                groups:[{name:'PROXY',type:'Selector',now:running ? current : '',all:['HK','JP',...Array.from({length:510},(_,i)=>'节点 '+(i+1))]},
+                    {name:'第二组',type:'URLTest',now:'HK',all:['HK','JP']},
+                    {name:'第三组',type:'Fallback',now:'JP',all:['JP','HK']},
+                    {name:'第四组',type:'Selector',now:'HK',all:['HK','JP']}],nodes:{HK:{type:'ss',delay:42},JP:{type:'ss',delay:80}}};
             else if (method === 'select') {current=payload.name;result={message:'已切换'};}
             else if (method === 'resources') {reads++;if (readFailure) throw Error('模拟资源读取失败');result=resourceView();}
             else if (method === 'resource_update') {updates.push(payload);polls=0;result={jobId:'a'.repeat(32)};}
@@ -56,6 +59,10 @@ const output = path.join(root, 'build/performance');
         } catch (error) {res.writeHead(200, {'Content-Type':'application/json'});res.end(JSON.stringify({ok:false,error:error.message}));}
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    if (process.argv.includes('--serve')) {
+        console.log('http://127.0.0.1:' + server.address().port + '/tools/preview.html#proxies');
+        return; // Keep the fixture server available for interactive browser QA.
+    }
     let browser;
     try {
         browser = await chromium.launch({channel:'chrome',headless:true});
@@ -73,10 +80,22 @@ const output = path.join(root, 'build/performance');
         assert.equal(await panel.locator('img').count(), 0);
         assert(await panel.locator('.fii-resource-row').nth(2).getByRole('button').isDisabled());
         assert.equal(new URL(page.url()).hash, '#proxies');
+        assert.deepEqual(await page.locator('[data-group]').evaluateAll(nodes=>nodes.map(n=>n.dataset.group)),['PROXY','第二组','第三组','第四组']);
         await page.getByRole('button',{name:'查看代理组 PROXY'}).click();
+        assert(await page.locator('.fii-proxy-node').count()<70);
         await page.locator('button[data-node="JP"]').click();
         await page.waitForFunction(() => document.querySelector('button[data-node="JP"]')?.classList.contains('is-current'));
         assert.equal(current, 'JP');
+        await page.getByRole('button',{name:'查看代理组 PROXY'}).click();
+        assert.equal(await page.locator('.fii-proxy-node').count(),0);
+        await page.getByRole('searchbox',{name:'搜索代理组或节点'}).fill('JP');
+        await page.getByRole('button',{name:'查看代理组 PROXY'}).click();
+        assert.equal(await page.getByRole('button',{name:'查看代理组 PROXY'}).getAttribute('aria-expanded'),'false');
+        await page.getByRole('button',{name:'收起所有代理组'}).click();
+        await page.getByRole('button',{name:'收起代理组面板'}).click();
+        assert.equal(await page.locator('.fii-proxy-panel-body').isVisible(),false);
+        assert(await panel.isVisible());
+        await page.getByRole('button',{name:'展开代理组面板'}).click();
         await panel.locator('.fii-resource-row').first().getByRole('button').click();
         await panel.getByText('正在由内核更新资源…',{exact:true}).waitFor();
         assert(await panel.getByRole('button',{name:'更新 GEO 数据',exact:true}).isDisabled());

@@ -22,7 +22,7 @@ const methods = ['get', 'status', 'save', 'refresh', 'preview', 'apply', 'servic
     'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'resource_update', 'core_info', 'core_check', 'core_update',
     'core_channel', 'network', 'transfer_begin', 'transfer_append', 'transfer_invoke', 'transfer_read',
     'transfer_release', 'transfer_status'];
-let documents = {}, coreCache = null, nextWait = 0, waits = {};
+let documents = {}, coreCache = null, groupOrderCache = null, nextWait = 0, waits = {};
 function path(name) { return root + name; }
 function check(ok, message) { if (!ok) die(message); }
 function message(e) { return type(e) == 'object' ? e.message : '' + e; }
@@ -243,6 +243,7 @@ function controllerReq(context, verb, settings, target, body, timeout, done) {
 }
 function groupsView(context, done) {
     let bundle = document('/etc/fii/active.json', limit, true);
+    let stamp = signature('/etc/fii/active.json');
     if (!bundle.outputId || !fs.stat(path('/tmp/fii/ready'))) return done(null);
     let settings = bundle.settings || {};
     return download(context, controllerUrl(settings, '/proxies'),
@@ -268,7 +269,27 @@ function groupsView(context, done) {
                         fixed: type(value.fixed) == 'string' ? value.fixed : '',
                         all: filter(value.all, (item) => type(item) == 'string') });
             }
-            done({ groups: result, nodes: nodes, running: true, source: 'runtime' });
+            function finish(order) {
+                let byName = {}, ordered = [];
+                for (let group in result) byName[group.name] = group;
+                for (let name in order) {
+                    if (type(name) == 'string' && byName[name]) {
+                        push(ordered, byName[name]); delete byName[name];
+                    }
+                }
+                // Retain any live groups absent from the active snapshot.
+                for (let group in result) if (byName[group.name]) push(ordered, group);
+                done({ groups: ordered, nodes: nodes, running: true, source: 'runtime' });
+            }
+            if (groupOrderCache && same(groupOrderCache.stamp, stamp)) return finish(groupOrderCache.order);
+            // Parse YAML once per active snapshot, then keep only names in memory.
+            // Controller JSON object order (and custom GLOBAL order) is unrelated.
+            return context.worker('groups', { orderOnly: true }, function(reply) {
+                check(reply?.ok && type(reply.result?.order) == 'array', reply?.error || '无法读取代理组配置顺序');
+                if (same(stamp, signature('/etc/fii/active.json')))
+                    groupOrderCache = { stamp: stamp, order: reply.result.order };
+                finish(reply.result.order);
+            });
         });
 }
 function groupsRpc(context) {

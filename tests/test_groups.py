@@ -6,7 +6,7 @@ import threading
 from unittest.mock import patch
 
 from test_fii import TestDirectory
-from fii import model, render, runtime
+from fii import cli, model, render, runtime
 from fii.store import rooted, write_json
 
 
@@ -62,6 +62,20 @@ class ProxyGroupsTests(unittest.TestCase):
             with self.subTest(args=args),patch.object(runtime,'controller') as controller,self.assertRaisesRegex(ValueError,'内核已停止'):
                 runtime.select_proxy(*args)
             controller.assert_not_called()
+
+    def test_running_group_order_comes_from_active_yaml_not_json_or_custom_global(self):
+        rooted('/tmp/fii').mkdir(parents=True,exist_ok=True);rooted('/tmp/fii/ready').write_text('ready')
+        reply={'proxies':{
+            'Extra':{'type':'Selector','all':['HK']},
+            'Provider':{'type':'Fallback','all':['HK']},
+            'Auto':{'type':'URLTest','all':['HK']},
+            'Manual':{'type':'Selector','all':['Auto','HK','DIRECT']},
+            'GLOBAL':{'type':'Selector','all':['Provider','Auto','Manual']}}}
+        with patch.object(runtime,'controller',return_value=reply):
+            self.assertEqual([g['name'] for g in runtime.groups()['groups']],['Manual','Auto','Provider','Extra'])
+        with patch.object(runtime,'controller') as controller:
+            self.assertEqual(cli.dispatch('groups',{'orderOnly':True}),{'order':['Manual','Auto','Provider']})
+        controller.assert_not_called()
 
     def test_manual_selection_checks_membership_and_escapes_names(self):
         data={'running':True,'groups':[{'name':'Group / A','type':'Selector','all':['HK','DIRECT']},

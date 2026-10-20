@@ -202,6 +202,13 @@ def controller(path, payload=None, *, method=None, timeout=4):
         raise ValueError("Mihomo 控制器请求失败，请检查服务状态") from None
 
 
+def group_order(bundle=None):
+    bundle = bundle or active()
+    config = load_map(bundle['yaml']) if bundle else {}
+    return [group['name'] for group in config.get('proxy-groups') or []
+            if isinstance(group, dict) and isinstance(group.get('name'), str)]
+
+
 def groups():
     bundle = active()
     if bundle and rooted('/tmp/fii/ready').exists():
@@ -223,6 +230,8 @@ def groups():
                 result.append({'name': name, 'type': value.get('type', ''),
                     'now': value.get('now', ''), 'fixed':value.get('fixed') if isinstance(value.get('fixed'), str) else '',
                     'all': [item for item in members if isinstance(item, str)]})
+        order = {name: index for index, name in enumerate(group_order(bundle))}
+        result.sort(key=lambda group: order.get(group['name'], len(order)))
         return {'groups': result, 'nodes': nodes, 'running': True, 'source': 'runtime'}
     # Stopped cores still have a useful configuration to inspect. Do not call
     # the controller, render scripts, or guess persisted/automatic selections.

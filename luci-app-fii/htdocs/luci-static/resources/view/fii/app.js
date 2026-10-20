@@ -7,7 +7,7 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Content version is synchronized by tools/build_ipk.py, including same-version rebuilds.
-var fiiStyleHash = 'ad673c223f5c2c9a';
+var fiiStyleHash = '4ed112caa7230da9';
 var fiiStylePromise = null;
 function loadStyle() {
     var href = L.resource('fii/style.css') + '?v=' + fiiStyleHash;
@@ -739,6 +739,7 @@ return view.extend({
     proxyGroupsPanel: function() {
         var self = this, data = null, loading = false, stale = false, serial = 0, cleanups = [], modalHost = null, modalName = null;
         var state = self.proxyUI || (self.proxyUI = { query:'', sort:'config', groups:Object.create(null) });
+        if (state.panelOpen == null) state.panelOpen = true;
         var types = { Selector:'手动选择', URLTest:'自动测速', Fallback:'故障转移', LoadBalance:'负载均衡', Relay:'链式代理' };
         function kind(value) { return types[value] || value || '代理'; }
         function canPin(group) { return group.type === 'URLTest' || group.type === 'Fallback'; }
@@ -764,7 +765,7 @@ return view.extend({
         var host = E('div', { 'class':'fii-proxy-groups' });
         var search = E('input', { type:'search', value:state.query, placeholder:'搜索代理组或节点', 'aria-label':'搜索代理组或节点', input:function() {
             state.query = search.value;
-            Object.keys(state.groups).forEach(function(name) { state.groups[name].scroll = 0; });
+            Object.keys(state.groups).forEach(function(name) { state.groups[name].scroll = 0; state.groups[name].searchClosed = false; });
             renderGroups();
         } });
         var sort = E('select', { 'aria-label':'节点排序', change:function() {
@@ -778,9 +779,18 @@ return view.extend({
             data.groups.forEach(function(group) { groupState(group.name).open = false; });
             state.query = ''; search.value = ''; renderGroups();
         }, false, { 'class':'fii-proxy-collapse', 'aria-label':'收起所有代理组' });
-        var panel = E('section', { 'class':'fii-proxies-panel', 'aria-label':'代理组面板' }, [
-            E('div', { 'class':'fii-proxies-heading' }, [E('div', { 'class':'fii-proxies-title' }, [E('h3', {}, '代理组'), count, status]), refresh]),
+        var panelBody = E('div', { id:'fii-proxy-panel-content', 'class':'fii-proxy-panel-body' }, [
             E('div', { 'class':'fii-proxy-toolbar' }, [search, sort, collapse]), host]);
+        panelBody.hidden = !state.panelOpen;
+        var panelToggle = button(state.panelOpen ? '收起面板' : '展开面板', function() {
+            state.panelOpen = !state.panelOpen; panelBody.hidden = !state.panelOpen;
+            panelToggle.textContent = state.panelOpen ? '收起面板' : '展开面板';
+            panelToggle.setAttribute('aria-expanded', String(state.panelOpen));
+            panelToggle.setAttribute('aria-label', state.panelOpen ? '收起代理组面板' : '展开代理组面板');
+        }, false, { 'aria-label':state.panelOpen ? '收起代理组面板' : '展开代理组面板',
+            'aria-expanded':String(state.panelOpen), 'aria-controls':'fii-proxy-panel-content' });
+        var panel = E('section', { 'class':'fii-proxies-panel', 'aria-label':'代理组面板' }, [
+            E('div', { 'class':'fii-proxies-heading' }, [E('div', { 'class':'fii-proxies-title' }, [E('h3', {}, '代理组'), count, status]), actions([refresh, panelToggle])]), panelBody]);
 
         function filteredNodes(group) {
             var query = state.query.trim().toLocaleLowerCase(), groupMatches = group.name.toLocaleLowerCase().indexOf(query) >= 0;
@@ -882,10 +892,9 @@ return view.extend({
             if (!data) return;
             var query = state.query.trim().toLocaleLowerCase();
             var groups = data.groups.filter(function(group) { return group.name.toLocaleLowerCase().indexOf(query) >= 0 || group.all.some(function(name) { return name.toLocaleLowerCase().indexOf(query) >= 0; }); });
-            var columns = [E('div', { 'class':'fii-proxy-column' }), E('div', { 'class':'fii-proxy-column' })];
-            groups.forEach(function(group, index) {
+            var articles = groups.map(function(group) {
                 var gs = groupState(group.name), nodeMatches = query && group.name.toLocaleLowerCase().indexOf(query) < 0;
-                var open = gs.open || !!nodeMatches, body = E('div', { 'class':'fii-proxy-inline-body' });
+                var open = gs.open || (!!nodeMatches && !gs.searchClosed), body = E('div', { 'class':'fii-proxy-inline-body' });
                 var current = currentLabel(group);
                 var preview = E('span', { 'class':'fii-proxy-preview', 'aria-hidden':'true' }, group.all.slice(0,32).map(function(name) {
                     return E('i', { 'class':health(data.nodes[name] || {}).tone + (name === group.now ? ' selected' : '') });
@@ -893,17 +902,19 @@ return view.extend({
                 if (group.all.length > 32) preview.appendChild(E('small', {}, '+' + (group.all.length - 32)));
                 var header = E('button', { type:'button', 'class':'fii-proxy-group-toggle', 'aria-label':'查看代理组 ' + group.name, 'aria-expanded':mobile() ? 'false' : String(open), click:function() {
                     if (mobile()) return showGroup(group);
-                    gs.open = !open; renderGroups();
+                    gs.open = !open; gs.searchClosed = !gs.open; renderGroups();
                     var target = Array.from(host.querySelectorAll('.fii-proxy-group-toggle')).find(function(element) { return element.closest('[data-group]').dataset.group === group.name; });
                     if (target) target.focus({ preventScroll:true });
                 } }, [E('span', { 'class':'fii-proxy-group-line' }, [E('span', { 'class':'fii-proxy-group-name' }, group.name),
-                    E('span', { 'class':'fii-proxy-kind' }, kind(group.type) + ' · ' + memberCount(group)), E('span', { 'class':'fii-proxy-chevron', 'aria-hidden':'true' })]),
+                    E('span', { 'class':'fii-proxy-kind' }, kind(group.type) + ' · ' + memberCount(group)),
+                    E('span', { 'class':'fii-proxy-toggle-label', 'aria-hidden':'true' }, mobile() ? '查看' : open ? '收起' : '展开'),
+                    E('span', { 'class':'fii-proxy-chevron', 'aria-hidden':'true' })]),
                     E('span', { 'class':'fii-proxy-current', title:current }, [E('span', { 'aria-hidden':'true' }, '↳ '), current]), preview]);
                 var article = E('article', { 'class':'fii-proxy-group' + (open ? ' is-open' : ''), 'data-group':group.name }, [header, body]);
                 if (open && !mobile()) body.appendChild(nodeList(group));
-                columns[index % 2].appendChild(article);
+                return article;
             });
-            host.replaceChildren.apply(host, columns);
+            host.replaceChildren.apply(host, articles);
             if (!groups.length) host.appendChild(E('p', { 'class':'fii-proxy-empty' }, data.groups.length ? '没有匹配的代理组或节点' : data.source === 'none' ? '生成运行配置后，这里会展示代理组。' : '当前配置没有代理组。'));
             if (modalHost && modalHost.isConnected) {
                 var group = data.groups.find(function(item) { return item.name === modalName; });

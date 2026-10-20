@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix='fii-rpc-verify-') as temporary:
     data['outputs'] = [{'id': 'output', 'name': 'Output', 'sourceIds': ['source'], 'overrideIds': []}]
     Store().save(data, Store().read()['revision'])
     summary = cli.dispatch('get', {'compact': True})
-    expected = {'compact': summary, 'source': cli.dispatch('get', {'kind': 'sources', 'id': 'source', 'sync': True}),
+    expected = {'groupOrder': ['PROXY', 'AUTO', '分组🚀'], 'compact': summary, 'source': cli.dispatch('get', {'kind': 'sources', 'id': 'source', 'sync': True}),
                 'override': cli.dispatch('get', {'kind': 'overrides', 'id': 'script', 'sync': True}),
                 'output': cli.dispatch('get', {'kind': 'outputs', 'id': 'output', 'sync': True})}
     write_json(Path(temporary) / 'expected.json', expected)

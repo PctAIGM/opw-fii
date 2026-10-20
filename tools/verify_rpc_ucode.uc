@@ -35,6 +35,8 @@ const context = {
     defer: function() { pending = true; return null; },
     worker: function(method, payload, done) {
         workers++;
+        if (method == 'groups' && payload.orderOnly)
+            return done({ ok: true, result: { order: expected.groupOrder } });
         done({ ok: false, error: 'worker-fallback:' + method });
         return null;
     },
@@ -160,7 +162,7 @@ test('network choices use native asynchronous system queries', function() {
     check(result.hosts[0].name == 'desktop' && result.users[0].id == '0' && result.groups[1].id == '100', 'host and account parsing');
     check(workers == count, 'network queries do not start Python');
 });
-test('proxy groups render from the controller without Python while running', function() {
+test('proxy groups preserve active YAML order with an in-memory snapshot cache', function() {
     fs.mkdir(root + '/tmp/fii', 0700);
     write(root + '/tmp/fii/ready', 'fixture\n');
     let count = workers;
@@ -171,7 +173,20 @@ test('proxy groups render from the controller without Python while running', fun
     check(view.nodes['香港🚀'].delay == 42 && view.nodes['香港🚀'].alive == true && view.nodes['香港🚀'].testedAt == '2026-10-20T00:00:00Z' && view.nodes['香港🚀'].type == 'Shadowsocks', 'node history normalized');
     check(view.nodes['日本'].delay == null && view.nodes['日本'].alive == null && view.nodes['日本'].testedAt == '', 'missing history is null');
     check('GLOBAL' in view.nodes && !('weird' in view.nodes), 'GLOBAL node kept, non-object skipped');
-    check(workers == count, 'groups do not start Python');
+    check(workers == count + 1, 'group order is parsed once for the active snapshot');
+    let saved = proxiesBody;
+    let shuffled = json(proxiesBody);
+    shuffled.proxies.GLOBAL.all = ['AUTO', 'PROXY'];
+    proxiesBody = sprintf('%J', shuffled);
+    view = unwrap(invoke('groups'));
+    check(same(map(view.groups, (group) => group.name), expected.groupOrder), 'active YAML order wins over JSON and custom GLOBAL order');
+    check(workers == count + 1, 'subsequent group reads reuse the in-memory order');
+    proxiesBody = saved;
+    let active = json(fs.readfile(root + '/etc/fii/active.json'));
+    active.revision = 12345;
+    write(root + '/etc/fii/active.json', sprintf('%J', active));
+    view = unwrap(invoke('groups'));
+    check(workers == count + 2, 'active snapshot changes invalidate the order cache');
     fs.unlink(root + '/tmp/fii/ready');
     check(invoke('groups').error == 'worker-fallback:groups', 'stopped cores delegate snapshots to the worker');
 });
