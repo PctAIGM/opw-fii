@@ -76,6 +76,9 @@ def verify():
                     view = archive.extractfile('./www/luci-static/resources/view/fii/app.js').read()
                     marker = re.search(rb"var fiiStyleHash = '([0-9a-f]{16})';", view)
                     assert marker and marker[1].decode() == hashlib.sha256(style).hexdigest()[:16], 'UI stylesheet cache version must match the packaged CSS'
+                    menu = json.loads(archive.extractfile('./usr/share/luci/menu.d/luci-app-fii.json').read())
+                    action = menu['admin/services/fii']['action']
+                    assert action['path'] == 'fii/app' and action['version'] == hashlib.sha256(view).hexdigest()[:16], 'LuCI view cache version must match the packaged JavaScript'
         result.append({"package": record["file"], "entries": len(names), "verified": True})
     print(json.dumps(result, indent=2))
     return result

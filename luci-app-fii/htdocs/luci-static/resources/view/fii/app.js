@@ -341,32 +341,59 @@ function selection(label, items, initial, help) {
         read: function() { return selected.slice(); } };
 }
 
-function entries(label, initial, placeholder, suggestions) {
+function entries(label, initial, placeholder, suggestions, formatValue) {
     var values = initial.slice(), list = E('div', { 'class': 'fii-entry-list' });
     var draft = field('添加' + label, '', {});
     draft.control.placeholder = placeholder || '';
+    function key(value) {
+        value = value.trim();
+        return /^(?:[\da-f]{2}:){5}[\da-f]{2}$/i.test(value) ? value.toLowerCase() : value;
+    }
+    function unique(items) {
+        var seen = new Set();
+        return items.filter(function(value) {
+            var id = key(value);
+            if (seen.has(id)) return false;
+            seen.add(id); return true;
+        });
+    }
+    function contains(value) { return values.some(function(item) { return key(item) === key(value); }); }
     function draw() {
         list.replaceChildren.apply(list, values.map(function(value) {
-            return E('div', { 'class': 'fii-entry' }, [E('span', {}, value), button('移除', function() {
+            var suggestion = (suggestions || []).find(function(item) { return key(item[0]) === key(value); });
+            var display = formatValue ? formatValue(value) : suggestion ? suggestion[1] : value;
+            return E('div', { 'class': 'fii-entry' }, [E('span', { title: value }, display), button('移除', function() {
                 values = values.filter(function(v) { return v !== value; }); draw();
             }, false, { 'aria-label': '移除 ' + value })]);
         }));
+        if (pick) {
+            var seen = new Set();
+            var available = suggestions.filter(function(item) {
+                var id = key(item[0]);
+                if (contains(item[0]) || seen.has(id)) return false;
+                seen.add(id); return true;
+            });
+            pick.control.replaceChildren.apply(pick.control, [E('option', { value: '' }, available.length ? '从列表选择…' : '所有候选项均已添加')].concat(
+                available.map(function(item) { return E('option', { value: item[0] }, item[1]); })));
+            pick.control.value = '';
+            pick.control.disabled = !available.length;
+        }
     }
     function add() {
         var value = draft.read().trim();
-        if (value && values.indexOf(value) < 0) values.push(value);
+        if (value && !contains(value)) values.push(value);
         draft.control.value = ''; draw(); draft.control.focus();
     }
     draft.control.addEventListener('keydown', function(event) { if (event.key === 'Enter') { event.preventDefault(); add(); } });
     var pick = suggestions && suggestions.length ? field('选择' + label, '', { select: [['', '从列表选择…']].concat(suggestions) }) : null;
     if (pick) pick.control.addEventListener('change', function() {
-        if (pick.read() && values.indexOf(pick.read()) < 0) values.push(pick.read());
+        if (pick.read() && !contains(pick.read())) values.push(pick.read());
         pick.control.value = ''; draw();
     });
     draw();
     return { node: E('fieldset', { 'class': 'fii-selection fii-entries' }, [E('legend', {}, label), list,
         pick ? pick.node : '', E('div', { 'class': 'fii-entry-add' }, [draft.node, button('添加', add)])]),
-        read: function() { return Array.from(new Set(values.concat(draft.read().trim() ? [draft.read().trim()] : []))); } };
+        read: function() { return unique(values.concat(draft.read().trim() ? [draft.read().trim()] : [])); } };
 }
 
 function legacyAccess(s, scope) {
@@ -1364,10 +1391,17 @@ return view.extend({
         }), s.interfaces);
         var lanAcl = accessEditor('lan', legacyAccess(s, 'lan'), network);
         var routerAcl = accessEditor('router', legacyAccess(s, 'router'), network);
+        function deviceLabel(value) {
+            var matches = (network.hosts || []).filter(function(h) {
+                return h.ip === value || (h.mac || '').toLowerCase() === value.toLowerCase();
+            });
+            var host = matches.find(function(h) { return h.name; }) || matches[0];
+            return host ? Array.from(new Set([host.name, host.ip, host.mac].filter(Boolean))).join(' · ') : value;
+        }
         var directDevices = entries('直连设备（MAC / IP / 网段）', s.lanBypassDevices || [], 'AA:BB:CC:DD:EE:FF 或 192.168.1.100',
             (network.hosts || []).filter(function(h) { return h.mac; }).map(function(h) {
-                return [h.mac, (h.name || h.ip) + ' · ' + h.ip + ' · ' + h.mac];
-            }));
+                return [h.mac, deviceLabel(h.mac)];
+            }), deviceLabel);
         var dns = toggle('接管局域网 DNS', s.dnsHijack, '将设备的常规 DNS 查询交给 Mihomo。');
         var routerDns = toggle('接管路由器本机 DNS', s.routerDnsHijack !== false);
         var dns6 = toggle('接管 IPv6 DNS', s.dnsIpv6Hijack && (s.dnsFamilyIndependent || s.ipv6));

@@ -2,7 +2,15 @@
   "admin/services/fii": {
     "title": "FII",
     "order": 60,
-    "action": { "type": "view", "path": "fii/app" },
-    "depends": { "acl": ["luci-app-fii"] }
+    "action": {
+      "type": "view",
+      "path": "fii/app",
+      "version": "38731c807d9ed5af"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-fii"
+      ]
+    }
   }
 }

@@ -14,7 +14,7 @@ const assert = require('node:assert/strict');
         'from tools.preview import Handler, ThreadingHTTPServer',
         'os.environ["FII_ROOT"] = sys.argv[1]',
         'from fii import network',
-        'network.choices = lambda: {"devices":[{"name":"br-lan","networks":["lan"],"up":True}],"hosts":[{"name":"测试手机","ip":"192.168.1.100","mac":"AA:BB:CC:DD:EE:FF"}],"users":[],"groups":[],"cgroups":[]}',
+        'network.choices = lambda: {"devices":[{"name":"br-lan","networks":["lan"],"up":True}],"hosts":[{"name":"测试手机","ip":"192.168.1.100","mac":"AA:BB:CC:DD:EE:FF"},{"name":"重复租约","ip":"192.168.1.101","mac":"aa:bb:cc:dd:ee:ff"}],"users":[],"groups":[],"cgroups":[]}',
         'server = ThreadingHTTPServer(("127.0.0.1",8765),Handler)',
         'print("ready",flush=True)',
         'server.serve_forever()'
@@ -62,7 +62,22 @@ const assert = require('node:assert/strict');
         await page.getByRole('checkbox',{name:'代理路由器本机',exact:true}).uncheck();
         await page.getByRole('button',{name:'访问控制',exact:true}).click();
         assert.equal(await dnsNotice.isVisible(),false);
-        await page.getByRole('combobox',{name:'选择'+label,exact:true}).selectOption('AA:BB:CC:DD:EE:FF');
+        const pick = page.getByRole('combobox',{name:'选择'+label,exact:true});
+        assert.equal(await pick.locator('option').count(),2,'Duplicate DHCP MAC entries are collapsed');
+        await pick.selectOption('AA:BB:CC:DD:EE:FF');
+        const selectedEntry = page.locator('.fii-entry').filter({has:page.getByRole('button',{name:'移除 AA:BB:CC:DD:EE:FF',exact:true})});
+        assert.equal(await selectedEntry.locator('span').textContent(),'测试手机 · 192.168.1.100 · AA:BB:CC:DD:EE:FF');
+        assert.equal(await pick.locator('option[value="AA:BB:CC:DD:EE:FF"]').count(),0);
+        assert.equal(await pick.isDisabled(),true);
+        await page.getByRole('textbox',{name:'添加'+label,exact:true}).fill('aa:bb:cc:dd:ee:ff');
+        await page.getByRole('button',{name:'添加',exact:true}).click();
+        assert.equal(await page.getByRole('button',{name:'移除 AA:BB:CC:DD:EE:FF',exact:true}).count(),1);
+        assert.equal(await page.getByRole('button',{name:'移除 aa:bb:cc:dd:ee:ff',exact:true}).count(),0);
+        await page.getByRole('button',{name:'移除 AA:BB:CC:DD:EE:FF',exact:true}).click();
+        assert.equal(await pick.isEnabled(),true);
+        assert.equal(await pick.locator('option[value="AA:BB:CC:DD:EE:FF"]').count(),1);
+        await pick.selectOption('AA:BB:CC:DD:EE:FF');
+        results.push('selected devices disappear, removal restores choices and MAC matching ignores case');
         // An unsubmitted draft must also be included by the standard entries editor.
         await page.getByRole('textbox',{name:'添加'+label,exact:true}).fill('2001:db8::/64');
         await page.getByRole('button',{name:'运行设置',exact:true}).click();
@@ -77,8 +92,13 @@ const assert = require('node:assert/strict');
         results.push('conditional router DNS notice, DHCP MAC selection, IPv6 draft, tab switching and real backend save');
         await page.reload(); await access();
         await page.getByRole('button',{name:'移除 AA:BB:CC:DD:EE:FF',exact:true}).waitFor();
+        assert.equal(await selectedEntry.locator('span').textContent(),'测试手机 · 192.168.1.100 · AA:BB:CC:DD:EE:FF');
+        const unknownEntry=page.locator('.fii-entry').filter({has:page.getByRole('button',{name:'移除 2001:db8::/64',exact:true})});
+        assert.equal(await unknownEntry.locator('span').textContent(),'2001:db8::/64');
+        assert.equal(await pick.locator('option[value="AA:BB:CC:DD:EE:FF"]').count(),0);
+        assert.equal(await pick.isDisabled(),true);
         assert.deepEqual((await rpc('export')).data.settings.lanBypassDevices,saved.settings.lanBypassDevices);
-        results.push('reload and backup export retain direct devices');
+        results.push('reload retains device name, IP and MAC labels; unknown addresses keep their original text');
         await page.locator('.fii').screenshot({path:path.join(output,'desktop.png')});
         await page.setViewportSize({width:390,height:844});
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),true);

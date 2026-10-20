@@ -9,7 +9,7 @@ from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.1-40"
+VERSION = "0.1.1-41"
 EPOCH = 1792339200  # 2026-10-19 00:00 UTC, deterministic archive timestamps.
 
 
@@ -82,6 +82,13 @@ def main():
     assert count == 1, 'Missing or duplicate UI style hash marker'
     if updated != source:
         view_path.write_bytes(updated)
+    # LuCI fetches views through XHR with its own resource version. Give FII's
+    # menu action a content version so an existing browser cache cannot keep
+    # serving an older app.js after an application-only update.
+    menu_path = ROOT / 'luci-app-fii/root/usr/share/luci/menu.d/luci-app-fii.json'
+    menu = json.loads(menu_path.read_text(encoding='utf-8'))
+    menu['admin/services/fii']['action']['version'] = hashlib.sha256(updated).hexdigest()[:16]
+    menu_path.write_text(json.dumps(menu, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='\n')
     postinst = b'''#!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
 /bin/sh /etc/uci-defaults/90-fii && rm -f /etc/uci-defaults/90-fii
