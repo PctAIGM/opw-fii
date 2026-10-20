@@ -6,18 +6,17 @@ from pathlib import Path
 from .model import check, defaults
 from .proxy import modes, ports, mark, rules
 
-FAKE4 = "198.18.0.0/16"
-FAKE6 = "fc00::/18"
-
-
 def dns_families(s):
     return (["ipv4"] if s["dnsIpv4Hijack"] else []) + (["ipv6"] if s["dnsIpv6Hijack"] and (s["dnsFamilyIndependent"] or s["ipv6"]) else [])
 
 
-def generate(settings):
+def generate(settings, config=None):
     s = {**defaults()["settings"], **settings}
     if s["mode"] == "core" or not s["proxyEnabled"]:
         return ""
+    from .mihomo import dns_options
+    output_dns = dns_options(config)
+    fake4, fake6 = output_dns['fake4'], output_dns['fake6']
     protocols = modes(s)
     families = (["ipv4"] if s["ipv4Proxy"] else []) + (["ipv6"] if s["ipv6"] else [])
     dns = dns_families(s)
@@ -40,7 +39,7 @@ def generate(settings):
     elif len(families) == 1:
         common.insert(0, "meta nfproto != %s return" % families[0])
     for version in (4, 6):
-        expression, fake = ("ip", FAKE4) if version == 4 else ("ip6", FAKE6)
+        expression, fake = ("ip", fake4) if version == 4 else ("ip6", fake6)
         reserved = s["reservedIpv%d" % version] + [x for x in s["bypass"] if ipaddress.ip_network(x, strict=False).version == version]
         reserved = list(ipaddress.collapse_addresses(ipaddress.ip_network(x, strict=False) for x in reserved))
         if reserved:
@@ -107,18 +106,18 @@ def generate(settings):
                 verdict = "meta mark set meta mark & 0xffff0000 | 0x0000f101 tproxy to :%d counter accept" % s["tproxyPort"]
             values = ", ".join(ports(s[proto + "Ports"]))
             for version in (4, 6):
-                expr, fake = ("ip", FAKE4) if version == 4 else ("ip6", FAKE6)
+                expr, fake = ("ip", fake4) if version == 4 else ("ip6", fake6)
                 family_verdict = verdict.replace("tproxy to", "tproxy " + expr + " to")
                 lines.append("meta l4proto %s %s daddr %s %s" % (proto, expr, fake, family_verdict))
             lines.append("meta l4proto %s th dport { %s } %s" % (proto, values, verdict))
         return lines
 
     fake_ping = []
-    if s["fakeIpPing"] and s["dnsMode"] == "fake-ip":
+    if s["fakeIpPing"] and output_dns['enabled'] and output_dns['mode'] == 'fake-ip':
         if s["ipv4Proxy"]:
-            fake_ping.append("icmp type echo-request ip daddr %s counter redirect" % FAKE4)
+            fake_ping.append("icmp type echo-request ip daddr %s counter redirect" % fake4)
         if s["ipv6"]:
-            fake_ping.append("icmpv6 type echo-request ip6 daddr %s counter redirect" % FAKE6)
+            fake_ping.append("icmpv6 type echo-request ip6 daddr %s counter redirect" % fake6)
     chain("fake_ping", fake_ping)
     for scope in ("lan", "router"):
         for action in ("traffic", "dns", "ping"):

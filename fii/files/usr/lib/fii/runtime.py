@@ -2,13 +2,13 @@
 import copy
 import json
 import os
+import re
 import subprocess
 import time
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
 from .model import check, defaults
-from .render import dump, load_map, render
 from .store import Store, atomic_write, lock, rooted, write_json
 
 CORE = "/etc/fii/bin/mihomo"
@@ -17,6 +17,21 @@ BYPASS_MARK = 0xF100
 PROXY_MARK = 0xF101
 ROUTE_TABLE = 20230
 ROUTE_PRIORITY = 30000
+
+
+def dump(*args, **kwargs):
+    from .render import dump as operation
+    return operation(*args, **kwargs)
+
+
+def load_map(*args, **kwargs):
+    from .render import load_map as operation
+    return operation(*args, **kwargs)
+
+
+def render(*args, **kwargs):
+    from .render import render as operation
+    return operation(*args, **kwargs)
 
 
 def run(args, timeout=30, required=True):
@@ -31,12 +46,15 @@ def run(args, timeout=30, required=True):
     return result.stdout.strip()
 
 
-def overlay(body, settings):
+def overlay(body, settings, warnings=None):
     settings = {**defaults()["settings"], **settings}
     from .proxy import modes
     protocols = modes(settings)
     tun = "tun" in protocols.values()
     root = load_map(body)
+    original = copy.deepcopy(root) if warnings is not None else None
+    from .mihomo import seed, dns_options
+    seed(root, final=True)
     # These are owned by the router integration. User overrides cannot desynchronise routing.
     for key in ("port", "socks-port", "listeners", "external-controller-tls", "external-controller-unix",
                 "external-controller-pipe", "external-ui", "external-ui-url", "external-ui-name",
@@ -46,32 +64,50 @@ def overlay(body, settings):
                  "tproxy-port": settings["tproxyPort"] if "tproxy" in protocols.values() else 0, "allow-lan": True, "bind-address": "*",
                  "listeners": [{"name": "fii-mixed", "type": "mixed", "listen": "127.0.0.1", "port": settings["mixedPort"]}],
                  "external-controller": "127.0.0.1:%d" % settings["controllerPort"],
-                 "secret": settings["secret"], "ipv6": settings["ipv6"],
-                 "routing-mark": BYPASS_MARK, "tun": {"enable": tun, "device": "fii-tun", "stack": settings["tunStack"],
-                 "mtu": settings["tunMtu"], "auto-route": False, "auto-redirect": False,
-                 "auto-detect-interface": False, "dns-hijack": [], "inet6-address": ["fdfe:dcba:9876::1/126"] if settings["ipv6"] else []}})
+                 "secret": settings["secret"],
+                 "routing-mark": BYPASS_MARK})
+    tun_options = root.setdefault("tun", {})
+    check(isinstance(tun_options, dict), "tun 覆写必须是对象")
+    tun_options.update({"enable": tun, "device": "fii-tun", "auto-route": False, "auto-redirect": False,
+                        "auto-detect-interface": False, "dns-hijack": [],
+                        "inet6-address": ["fdfe:dcba:9876::1/126"] if settings["ipv6"] else []})
     dns = root.get("dns", {})
     check(isinstance(dns, dict), "dns 覆写必须是对象")
     from .proxy_nft import dns_families
-    dns.update({"enable": True, "listen": "[::]:%d" % settings["dnsPort"] if settings["ipv6"] or "ipv6" in dns_families(settings) else "0.0.0.0:%d" % settings["dnsPort"],
-                "ipv6": settings["ipv6"], "enhanced-mode": settings["dnsMode"], "fake-ip-range": "198.18.0.1/16", "fake-ip-range6": "fc00::/18",
-                "default-nameserver": settings["defaultNameservers"],
-                "proxy-server-nameserver": settings["proxyNameservers"] or settings["nameservers"], "nameserver": settings["nameservers"]})
-    if settings["mode"] == "core":
-        dns["listen"] = ("[::1]:%d" if settings["ipv6"] else "127.0.0.1:%d") % settings["dnsPort"]
-    dns["fake-ip-filter"] = settings["fakeIpFilter"]
-    policy = dns.setdefault("nameserver-policy", {})
-    check(isinstance(policy, dict), "dns.nameserver-policy 必须是对象")
-    for domain in ("+.lan", "+.local"):
-        policy.setdefault(domain, [settings["localDns"]])
+    dns_options(root)  # Validate the routing inputs before producing a preview.
+    from .proxy import rules
+    intercepted = settings['mode'] != 'core' and settings['proxyEnabled'] and dns_families(settings) and any(
+        settings[scope + 'Proxy'] and settings['dnsHijack' if scope == 'lan' else 'routerDnsHijack'] and
+        any(rule['enabled'] and rule['dns'] for rule in rules(settings, scope)) for scope in ('lan', 'router'))
+    check(dns['enable'] or not intercepted, 'Mihomo 配置已关闭 DNS；请在覆写中启用 dns.enable，或在路由器设置中关闭 DNS 接管')
+    if dns['enable']:
+        dns['listen'] = '[::]:%d' % settings['dnsPort'] if settings['ipv6'] or 'ipv6' in dns_families(settings) else '0.0.0.0:%d' % settings['dnsPort']
+        if settings['mode'] == 'core':
+            dns['listen'] = ('[::1]:%d' if settings['ipv6'] else '127.0.0.1:%d') % settings['dnsPort']
+    dns.setdefault('proxy-server-nameserver', copy.deepcopy(dns['nameserver']))
     root["dns"] = dns
-    root["profile"] = {"store-selected": True, "store-fake-ip": True}
+    profile = root.setdefault("profile", {})
+    check(isinstance(profile, dict), "profile 覆写必须是对象")
+    profile.setdefault("store-selected", True)
+    profile.setdefault("store-fake-ip", True)
+    if warnings is not None:
+        changed = []
+        def differences(before, after, prefix=""):
+            for key, value in before.items():
+                label = prefix + str(key)
+                if isinstance(value, dict) and isinstance(after.get(key), dict):
+                    differences(value, after[key], label + ".")
+                elif key not in after or value != after[key]:
+                    changed.append(label)
+        differences(original, root)
+        if changed:
+            warnings.append("路由器集成字段使用 FII 设置：" + "、".join(sorted(changed)))
     return dump(root)
 
 
-def nftables(settings):
+def nftables(settings, config=None):
     from .proxy_nft import generate
-    return generate(settings)
+    return generate(settings, config)
 
 
 def active():
@@ -93,16 +129,16 @@ def ready(bundle=None):
         return False
 
 
-def controller(path, payload=None):
+def controller(path, payload=None, *, method=None, timeout=4):
     bundle = active()
     check(bundle is not None and ready(bundle), "Mihomo 尚未运行")
     settings = bundle["settings"]
     content = json.dumps(payload).encode() if payload is not None else None
     req = Request("http://127.0.0.1:%d%s" % (settings["controllerPort"], path), data=content,
                   headers={"Authorization": "Bearer " + settings["secret"], "Content-Type": "application/json"},
-                  method="PUT" if payload is not None else "GET")
+                  method=method or ("PUT" if payload is not None else "GET"))
     try:
-        with build_opener(ProxyHandler({})).open(req, timeout=4) as response:
+        with build_opener(ProxyHandler({})).open(req, timeout=timeout) as response:
             body = response.read(2 * 1024 * 1024)
             return json.loads(body) if body else {}
     except (OSError, ValueError):
@@ -110,18 +146,72 @@ def controller(path, payload=None):
 
 
 def groups():
-    proxies = controller("/proxies").get("proxies", {})
-    return {"groups": [{"name": key, "type": value.get("type"), "now": value.get("now", ""),
-                         "all": value.get("all", [])} for key, value in proxies.items()
-                        if "all" in value and key != "GLOBAL"]}
+    bundle = active()
+    if bundle and rooted('/tmp/fii/ready').exists():
+        proxies = controller('/proxies').get('proxies', {})
+        check(isinstance(proxies, dict), '代理组响应无效')
+        result, nodes = [], {}
+        for name, value in proxies.items():
+            if not isinstance(value, dict):
+                continue
+            history = value.get('history')
+            last = history[-1] if isinstance(history, list) and history and isinstance(history[-1], dict) else {}
+            delay = last.get('delay')
+            nodes[name] = {'type': value.get('type', ''),
+                           'alive': value.get('alive') if type(value.get('alive')) is bool else None,
+                           'delay': delay if type(delay) is int and 0 <= delay <= 65535 else None,
+                           'testedAt': last.get('time') if isinstance(last.get('time'), str) else ''}
+            members = value.get('all')
+            if isinstance(members, list) and name != 'GLOBAL':
+                result.append({'name': name, 'type': value.get('type', ''),
+                    'now': value.get('now', ''), 'fixed':value.get('fixed') if isinstance(value.get('fixed'), str) else '',
+                    'all': [item for item in members if isinstance(item, str)]})
+        return {'groups': result, 'nodes': nodes, 'running': True, 'source': 'runtime'}
+    # Stopped cores still have a useful configuration to inspect. Do not call
+    # the controller, render scripts, or guess persisted/automatic selections.
+    config = load_map(bundle['yaml']) if bundle else {}
+    types = {'select':'Selector', 'url-test':'URLTest', 'fallback':'Fallback', 'load-balance':'LoadBalance', 'relay':'Relay'}
+    nodes = {'DIRECT': {'type':'Direct'}, 'REJECT': {'type':'Reject'}, 'REJECT-DROP': {'type':'RejectDrop'}}
+    for node in config.get('proxies') or []:
+        if isinstance(node, dict) and isinstance(node.get('name'), str):
+            nodes[node['name']] = {'type': node.get('type', '')}
+    result = []
+    for group in config.get('proxy-groups') or []:
+        if not isinstance(group, dict) or not isinstance(group.get('name'), str):
+            continue
+        name = group['name']; kind = types.get(group.get('type'), group.get('type', ''))
+        nodes[name] = {'type':kind}
+        members = group.get('proxies') or []
+        result.append({'name':name, 'type':kind, 'now':'', 'fixed':None,
+            'all':[item for item in members if isinstance(item, str)],
+            'dynamic':bool(group.get('use') or group.get('include-all') or group.get('include-all-proxies') or group.get('include-all-providers'))})
+    return {'groups':result, 'nodes':nodes, 'running':False, 'source':'snapshot' if bundle else 'none'}
 
 
-def select_proxy(group, name):
-    check(isinstance(group, str) and isinstance(name, str), "代理组和节点名称必须是文本")
-    available = next((g for g in groups()["groups"] if g["name"] == group), None)
-    check(available is not None and available["type"] == "Selector" and name in available["all"], "代理组不能手动切换或节点不存在")
-    controller("/proxies/" + quote(group, safe=""), {"name": name})
-    return {"message": "已切换到 " + name}
+def select_proxy(group, name=None, action='select'):
+    check(isinstance(group, str), '代理组名称必须是文本')
+    check(action in ('select', 'unpin'), '代理组操作无效')
+    if action == 'select':
+        check(isinstance(name, str), '节点名称必须是文本')
+    else:
+        check(name is None, '取消钉住不接受节点名称')
+    view = groups()
+    check(view['running'], '内核已停止，当前仅展示配置中的代理组')
+    available = next((g for g in view['groups'] if g['name'] == group), None)
+    check(available is not None, '代理组不存在')
+    automatic = available['type'] in ('URLTest', 'Fallback')
+    path = '/proxies/' + quote(group, safe='')
+    if action == 'unpin':
+        check(automatic, '只有自动测速组和故障转移组支持取消钉住')
+        controller(path, method='DELETE')
+        return {'message':'已取消钉住，恢复自动选择'}
+    check((available['type'] == 'Selector' or automatic) and name in available['all'], '代理组不支持选择或节点不存在')
+    # Fallback.Set may synchronously health-check a dead node for up to 5s.
+    if available['type'] == 'Fallback':
+        controller(path, {'name':name}, timeout=8)
+    else:
+        controller(path, {'name':name})
+    return {'message':('已钉住 ' if automatic else '已切换到 ') + name}
 
 
 def core_test(body):
@@ -134,6 +224,17 @@ def core_test(body):
     atomic_write(candidate, body)
     try:
         run([binary, "-t", "-d", str(directory), "-f", str(candidate)], timeout=25)
+    except ValueError as exc:
+        match = re.search(r'proxy (\d+): invalid REALITY short ID', str(exc))
+        if match:
+            index = int(match.group(1))
+            nodes = load_map(body).get('proxies', [])
+            if isinstance(nodes, list) and index < len(nodes) and isinstance(nodes[index], dict):
+                name = nodes[index].get('name', '未命名节点')
+                raise ValueError('节点「%s」（输出第 %d 项）的 REALITY short-id 无效。'
+                                 '应为 0–16 个十六进制字符且长度为偶数；请检查该节点及相关覆写。'
+                                 '当前运行配置未替换。' % (name, index + 1)) from None
+        raise
     finally:
         candidate.unlink(missing_ok=True)
 
@@ -143,7 +244,7 @@ def prepare():
     check(bundle is not None, "请先在输出页应用一个配置")
     core_test(bundle["yaml"])
     atomic_write(rooted("/tmp/fii/config.yaml"), bundle["yaml"])
-    atomic_write(rooted("/tmp/fii/firewall.nft"), nftables(bundle["settings"]))
+    atomic_write(rooted("/tmp/fii/firewall.nft"), nftables(bundle["settings"], bundle["yaml"]))
 
 
 def fake6_link():
@@ -152,6 +253,22 @@ def fake6_link():
         return links[0] if links else None
     except (ValueError, IndexError):
         return None
+
+
+def remove_old_fake6_routes(keep):
+    """Only prune routes on FII's already-verified dedicated dummy interface."""
+    import ipaddress
+    try:
+        routes = json.loads(run(['/sbin/ip', '-6', '-j', 'route', 'show', 'dev', 'fii-dummy'], required=False) or '[]')
+    except ValueError:
+        routes = []
+    for route in routes:
+        try:
+            network = ipaddress.ip_network(route.get('dst', ''), strict=False)
+        except (ValueError, AttributeError):
+            continue
+        if network.version == 6 and str(network) != keep:
+            run(['/sbin/ip', '-6', 'route', 'del', str(network), 'dev', 'fii-dummy'], required=False)
 
 
 def check_capabilities(settings):
@@ -190,7 +307,9 @@ def firewall_up():
         bundle = active()
         check(bundle is not None and ready(bundle), "内核未就绪，未接管流量")
         settings = {**defaults()["settings"], **bundle["settings"]}
-        content = nftables(settings)
+        content = nftables(settings, bundle["yaml"])
+        from .mihomo import dns_options
+        dns_config = dns_options(bundle['yaml'])
         if not content:
             firewall_down_unlocked()
             atomic_write(rooted("/tmp/fii/ready"), "core\n")
@@ -229,11 +348,12 @@ def firewall_up():
         atomic_write(path, batch)
         run(["/usr/sbin/nft", "-c", "-f", str(path)])
         try:
-            if settings["ipv6"] and settings["dnsMode"] == "fake-ip":
+            if settings["ipv6"] and dns_config['enabled'] and dns_config['mode'] == 'fake-ip':
                 link = fake6_link()
                 check(link is None or (link.get("ifalias") == "fii-fake-ip" and link.get("linkinfo", {}).get("info_kind") == "dummy"), "fii-dummy 接口已被其他服务占用")
-                existing_route = run(["/sbin/ip", "-6", "route", "show", "exact", "fc00::/18"])
-                check(not existing_route or "dev fii-dummy" in existing_route, "Fake-IP IPv6 路由 fc00::/18 已被占用")
+                fake6 = dns_config['fake6']
+                existing_route = run(["/sbin/ip", "-6", "route", "show", "exact", fake6])
+                check(not existing_route or "dev fii-dummy" in existing_route, "Fake-IP IPv6 路由 " + fake6 + " 已被占用")
                 if link is None:
                     run(["/sbin/ip", "link", "add", "name", "fii-dummy", "type", "dummy"])
                     try:
@@ -245,7 +365,12 @@ def firewall_up():
                         run(["/sbin/ip", "link", "del", "dev", "fii-dummy"], required=False)
                         raise
                 run(["/sbin/ip", "link", "set", "dev", "fii-dummy", "up"])
-                run(["/sbin/ip", "-6", "route", "replace", "fc00::/18", "dev", "fii-dummy"])
+                remove_old_fake6_routes(fake6)
+                run(["/sbin/ip", "-6", "route", "replace", fake6, "dev", "fii-dummy"])
+            else:
+                link = fake6_link()
+                if link and link.get('ifalias') == 'fii-fake-ip' and link.get('linkinfo', {}).get('info_kind') == 'dummy':
+                    run(['/sbin/ip', 'link', 'del', 'dev', 'fii-dummy'], required=False)
             for family in ("-4", "-6"):
                 for priority, mark, table, route in (("30000", "0xf101/0xffff", "20230", ["local", "default", "dev", "lo"]),
                                                      ("30001", "0xf102/0xffff", "20231", ["default", "dev", "fii-tun"])):
@@ -275,23 +400,45 @@ def restart_and_wait(bundle):
     raise ValueError("Mihomo 启动或透明代理准备失败，请查看运行日志")
 
 
+def service_active():
+    """Read procd's intent, including a managed instance awaiting respawn.
+
+    A stopped service has no instances. Fail before changing the snapshot if
+    procd cannot be queried, rather than guessing and changing service state.
+    """
+    try:
+        raw = run(['/bin/ubus', 'call', 'service', 'list', '{"name":"fii"}'], timeout=5)
+        services = json.loads(raw)
+        check(isinstance(services, dict), '服务状态响应无效')
+        service = services.get('fii', {})
+        check(isinstance(service, dict), '服务状态响应无效')
+        instances = service.get('instances', {})
+        check(isinstance(instances, dict), '服务实例状态无效')
+        check(all(isinstance(value, dict) for value in instances.values()), '服务实例状态无效')
+        return bool(instances)
+    except (ValueError, TypeError):
+        raise ValueError('无法确认 FII 服务状态，未更新运行配置；请稍后重试') from None
+
+
 def activate(output_id):
     with lock("operation", timeout=1):
         with lock():
             data = Store().read()
         rendered = render(data, output_id)
         check(rendered["nodeCount"] > 0, "没有可用节点，保留正在运行的配置；请检查订阅流量、缓存或筛选条件")
-        body = overlay(rendered["yaml"], data["settings"])
+        body = overlay(rendered["yaml"], data["settings"], warnings=rendered["warnings"])
         check_capabilities(data["settings"])
         core_test(body)
         previous = active()
+        was_active = service_active()
         bundle = {"outputId": output_id, "name": rendered["name"], "settings": copy.deepcopy(data["settings"]),
                   "yaml": body, "appliedAt": int(time.time()), "revision": data["revision"]}
         if previous:
             write_json(rooted("/etc/fii/active.previous.json"), previous)
         write_json(rooted("/etc/fii/active.json"), bundle)
         try:
-            restart_and_wait(bundle)
+            if was_active:
+                restart_and_wait(bundle)
         except ValueError as exc:
             if previous:
                 write_json(rooted("/etc/fii/active.json"), previous)
@@ -307,7 +454,8 @@ def activate(output_id):
                 rollback = "已停止服务并清理接管"
             raise ValueError(str(exc) + "；" + rollback) from None
         run([INIT, "enable" if data["settings"]["autostart"] else "disable"])
-        return {"message": "配置已应用", "warnings": rendered["warnings"]}
+        return {"message": "运行配置已更新，服务已重启" if was_active else "运行配置已更新，内核保持停止",
+                "warnings": rendered["warnings"], "restarted": was_active}
 
 
 def status():

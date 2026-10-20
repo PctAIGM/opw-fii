@@ -60,16 +60,29 @@ def checked_id(ident):
     return ident
 
 
-def begin(size):
-    check(type(size) is int and 0 < size <= MAX_REQUEST, '请求超过 16 MiB 或大小无效')
+def begin(size, file_upload=False):
+    check(type(file_upload) is bool, '上传类型无效')
+    check(type(size) is int and 0 < size <= (MAX_DOCUMENT if file_upload else MAX_REQUEST), '请求超过 16 MiB 或大小无效')
     with lock('transfers'):
         reserve(size)
         ident = secrets.token_hex(16)
         with open(path_for(ident, '.in'), 'xb'):
             pass
         os.chmod(path_for(ident, '.in'), 0o600)
-        write_json(path_for(ident, '.meta'), {'size': size})
-    return {'id': ident, 'chunkSize': CHUNK, 'protocol': 2}
+        write_json(path_for(ident, '.meta'), {'size': size, 'fileUpload': file_upload})
+    result = {'id': ident, 'chunkSize': CHUNK, 'protocol': 2}
+    if file_upload:
+        result['uploadPath'] = '/tmp/fii/transfers/' + ident + '.in'
+    return result
+
+
+def upload_status(ident):
+    with lock('transfers'):
+        meta, path = path_for(ident, '.meta'), path_for(ident, '.in')
+        check(meta.exists(), '传输已失效，请重新选择备份')
+        expected = json.loads(meta.read_text(encoding='utf-8'))['size']
+        received = path.stat().st_size if path.exists() else 0
+        return {'received': received, 'complete': received == expected}
 
 
 def append(ident, offset, data):
@@ -99,15 +112,23 @@ def append(ident, offset, data):
     return {'received': offset + len(chunk)}
 
 
-def consume(ident):
+def consume(ident, file_upload=False):
     ident = checked_id(ident)
     with lock('transfers'):
         meta, path = path_for(ident, '.meta'), path_for(ident, '.in')
         check(meta.exists() and path.exists(), '传输已失效，请重新选择备份')
-        size = json.loads(meta.read_text(encoding='utf-8'))['size']
+        info = json.loads(meta.read_text(encoding='utf-8'))
+        check(bool(info.get('fileUpload')) == file_upload, '上传类型不匹配')
+        size = info['size']
         check(path.stat().st_size == size, '文件尚未传输完成')
+        check(0 < size <= MAX_REQUEST, '请求超过 16 MiB 或大小无效')
         try:
-            return json.loads(path.read_text(encoding='utf-8'))
+            # CGI writes do not take the RPC lock. Bound the actual read too,
+            # even if a second upload replaces the path after the size check.
+            with open(path, 'rb') as stream:
+                raw = stream.read(size + 1)
+            check(len(raw) == size, '上传内容大小已变化，请重新上传')
+            return json.loads(raw.decode('utf-8-sig'))
         finally:
             path.unlink(missing_ok=True)
             meta.unlink(missing_ok=True)
@@ -126,7 +147,8 @@ def response(result, chunk_reply=False):
         with open(path, 'xb') as stream:
             stream.write(encoded)
         os.chmod(path, 0o600)
-    return json.dumps({'ok': True, 'responseTransfer': {'id': ident, 'size': len(encoded)}})
+    return json.dumps({'ok': True, 'responseTransfer': {'id': ident, 'size': len(encoded),
+                                                       'downloadPath': '/tmp/fii/transfers/' + ident + '.out'}})
 
 
 def read(ident, offset, size=CHUNK):

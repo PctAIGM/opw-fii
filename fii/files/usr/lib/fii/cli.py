@@ -8,16 +8,83 @@ import sys
 import time
 
 from . import __version__
-from .fetch import refresh
 from .model import MAX_DOCUMENT, check, import_backup, validate
-from .render import extract, render, validate_override
-from .runtime import INIT, activate, active, prepare, ready, run, status
 from .store import Store, lock, rooted, write_json
+
+# rpcd starts a process for every call, including transfer chunks and job polls.
+# Keep YAML, urllib and runtime setup off those lightweight paths.
+INIT = '/etc/init.d/fii'
+
+
+def refresh(*args, **kwargs):
+    from .fetch import refresh as operation
+    return operation(*args, **kwargs)
+
+
+def extract(*args, **kwargs):
+    from .render import extract as operation
+    return operation(*args, **kwargs)
+
+
+def render(*args, **kwargs):
+    from .render import render as operation
+    return operation(*args, **kwargs)
+
+
+def validate_override(*args, **kwargs):
+    from .render import validate_override as operation
+    return operation(*args, **kwargs)
+
+
+def active():
+    from .runtime import active as operation
+    return operation()
+
+
+def ready(*args):
+    from .runtime import ready as operation
+    return operation(*args)
+
+
+def status():
+    from .runtime import status as operation
+    return operation()
+
+
+def run(*args, **kwargs):
+    from .runtime import run as operation
+    return operation(*args, **kwargs)
+
+
+def activate(output_id):
+    from .runtime import activate as operation
+    return operation(output_id)
+
+
+def prepare():
+    from .runtime import prepare as operation
+    return operation()
 
 READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "core_info", "core_check", "network", "transfer_read")
 WRITE_METHODS = ("save", "refresh", "apply", "service", "import", "import_preview", "select", "core_update", "core_channel",
-                 "transfer_begin", "transfer_append", "transfer_invoke", "transfer_release")
+                 "transfer_begin", "transfer_append", "transfer_invoke", "transfer_release", "transfer_status")
 LONG_METHODS = ("refresh", "apply", "service", "core_update", "core_check", "import", "import_preview", "save", "preview")
+
+
+def background(method, payload):
+    if not isinstance(payload, dict):
+        return False  # dispatch() returns the normal validation error.
+    if method != 'save':
+        return method in LONG_METHODS
+    change = payload.get('patch')
+    if not isinstance(change, dict):
+        return True
+    # Metadata changes retain existing YAML/JS and never execute their validators.
+    if set(change) == {'settings'} or set(change) == {'kind', 'order'} or set(change) == {'kind', 'remove'}:
+        return False
+    if set(change) == {'kind', 'id', 'fields'} and isinstance(change['fields'], dict):
+        return bool(set(change['fields']) & {'body', 'cachedYaml', 'type'})
+    return True
 
 
 def job_path(ident):
@@ -105,11 +172,43 @@ def view_data(data):
     return result
 
 
+def compact_data(store):
+    """RAM-backed metadata cache, invalidated by the actual state file identity."""
+    path = rooted('/tmp/fii/state-view.json')
+    def signature():
+        return list(store.signature())
+    if store.path.exists():
+        stamp = signature()
+        try:
+            cached = json.loads(path.read_text(encoding='utf-8'))
+            if cached.get('schema') == 2 and cached['stamp'] == stamp:
+                return cached['data']
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return cache_view(store, store.read())
+
+
+def cache_view(store, data):
+    """Publish validated metadata for both Python and embedded ucode readers."""
+    path = rooted('/tmp/fii/state-view.json')
+    result = view_data(data)
+    # Caller holds the state lock, so cache and data describe the same revision.
+    # Also avoid tagging an old read with a newer, externally replaced file.
+    if store.snapshot is not None and store.snapshot[0] == store.signature():
+        try:
+            write_json(path, {'schema': 2, 'stamp': list(store.snapshot[0]), 'data': result})
+        except OSError:
+            pass  # A metadata cache is optional, including on a full tmpfs.
+    return result
+
+
 def apply_patch(data, patch):
     check(isinstance(patch, dict), '配置变更必须是对象')
     result = copy.deepcopy(data)
     if set(patch) == {'settings'}:
         check(isinstance(patch['settings'], dict), '设置无效')
+        from .mihomo import LEGACY_KEYS
+        check(not LEGACY_KEYS.intersection(patch['settings']), 'Mihomo 参数请在覆写中修改，路由器设置只接受接管与服务选项')
         result['settings'].update(patch['settings'])
         return result
     kind = patch.get('kind')
@@ -198,7 +297,9 @@ def dispatch(method, payload=None, progress=None):
     if method.startswith('transfer_'):
         from . import transport
         if method == 'transfer_begin':
-            return transport.begin(payload.get('size'))
+            return transport.begin(payload.get('size'), payload.get('fileUpload', False))
+        if method == 'transfer_status':
+            return transport.upload_status(payload.get('id'))
         if method == 'transfer_append':
             return transport.append(payload.get('id'), payload.get('offset'), payload.get('data'))
         if method == 'transfer_read':
@@ -211,11 +312,19 @@ def dispatch(method, payload=None, progress=None):
             check(operation in READ_METHODS + WRITE_METHODS and not operation.startswith('transfer_'), '传输操作无效')
             request = transport.consume(payload.get('id'))
             check(isinstance(request, dict), '请求参数必须是对象')
-            return queue_job(operation, request) if operation in LONG_METHODS else dispatch(operation, request)
+            return queue_job(operation, request) if background(operation, request) else dispatch(operation, request)
     if method == "job":
         path = job_path(payload.get("id"))
         check(path.exists(), "任务记录不存在，可能路由器已重启")
-        job = json.loads(path.read_text(encoding="utf-8"))
+        wait_ms = payload.get('waitMs', 0)
+        check(type(wait_ms) is int and 0 <= wait_ms <= 1000, '任务等待时间无效')
+        deadline = time.monotonic() + wait_ms / 1000
+        while True:
+            job = json.loads(path.read_text(encoding="utf-8"))
+            remaining = deadline - time.monotonic()
+            if job.get('done') or remaining <= 0:
+                break
+            time.sleep(min(0.025, remaining))
         limit = 900 if job.get("method") == "core_update" else 180
         if not job.get("done") and time.time() - job["createdAt"] > limit:
             return {"done": True, "ok": False, "error": "任务未完成，请刷新页面并查看日志"}
@@ -242,10 +351,23 @@ def dispatch(method, payload=None, progress=None):
         return groups()
     if method == "select":
         from .runtime import select_proxy
-        return select_proxy(payload.get("group"), payload.get("name"))
+        return select_proxy(payload.get("group"), payload.get("name"), payload.get('action', 'select'))
     if method == "logs":
-        output = run(["/sbin/logread", "-e", "fii", "-l", "150"], required=False, timeout=4)
-        return {"text": output[-48000:]}
+        # Match service tags, not cron commands / URLs which happen to contain fii.
+        output = run(["/sbin/logread", "-e", r" (fii(-prepare)?|mihomo)(\[[0-9]+\])?:", "-l", "500"], timeout=4)
+        clipped = len(output.encode('utf-8')) > 98304
+        if clipped:
+            output = output.encode('utf-8')[-98304:].decode('utf-8', 'replace').partition('\n')[2]
+        prepare = rooted('/tmp/fii/prepare.log')
+        preparation = ''
+        if prepare.is_file():
+            with prepare.open('rb') as stream:
+                size = stream.seek(0, 2)
+                stream.seek(max(0, size - 16384))
+                preparation = stream.read(16384).decode('utf-8', 'replace')
+                if size > 16384:
+                    preparation = preparation.partition('\n')[2]
+        return {"text": output, "prepareText": preparation, "limit": 500, "truncated": clipped}
     if method == "refresh":
         return refresh_one(payload.get("kind", "sources"), str(payload.get("id", "")))
     if method == "apply":
@@ -269,6 +391,18 @@ def dispatch(method, payload=None, progress=None):
         return {"message": "服务操作完成"}
     with lock():
         store = Store()
+        if method == 'get' and (payload.get('compact') or payload.get('metadataOnly') or payload.get('kind') == 'outputs'):
+            summary = compact_data(store)
+            if 'kind' not in payload:
+                return {'data': summary, 'version': __version__}
+            kind = payload['kind']
+            check(kind in ('sources', 'overrides', 'outputs'), '配置分类无效')
+            item = next((item for item in summary[kind] if item['id'] == payload.get('id')), None)
+            check(item is not None, '配置项不存在')
+            result = {'item': item, 'revision': summary['revision']}
+            if payload.get('sync'):
+                result['data'] = summary
+            return result
         data = store.read()
     if method in ("get", "export"):
         if method == 'get' and 'kind' in payload:
@@ -287,7 +421,7 @@ def dispatch(method, payload=None, progress=None):
         result = render(data, str(payload.get("id", "")), progress=progress)
         if payload.get("runtime"):
             from .runtime import overlay
-            result["yaml"] = overlay(result["yaml"], data["settings"])
+            result["yaml"] = overlay(result["yaml"], data["settings"], warnings=result["warnings"])
         return result
     if method == "nodes":
         source = next((s for s in data["sources"] if s["id"] == str(payload.get("id", ""))), None)
@@ -305,13 +439,20 @@ def dispatch(method, payload=None, progress=None):
         new_data = apply_patch(data, payload['patch']) if 'patch' in payload else copy.deepcopy(payload.get('data'))
         validate_contents(new_data, data)
         with lock():
-            store.save(new_data, payload.get("revision"))
-        return {"data": view_data(new_data) if payload.get('compact') else new_data, "message": "已保存；运行配置需在输出页点击应用"}
+            store.save(new_data, payload.get("revision"), validated=True)
+            summary = cache_view(store, new_data)
+        return {"data": summary if payload.get('compact') else new_data, "message": "已保存；运行配置需在输出页点击应用"}
     if method in ("import", "import_preview"):
         if method == 'import_preview' and payload.get('stage'):
             check(type(payload.get('revision')) is int and payload['revision'] == data['revision'],
                   '配置已变化，请重新载入后再检查备份')
-        imported, warnings = import_backup(payload.get("data"), data["settings"])
+        if 'upload' in payload:
+            check(method == 'import_preview' and 'data' not in payload, '文件上传只用于检查备份')
+            from .transport import consume
+            raw = consume(payload['upload'], file_upload=True)
+        else:
+            raw = payload.get('data')
+        imported, warnings = import_backup(raw, data["settings"])
         validate_contents(imported)
         if method == "import":
             with lock():
@@ -349,7 +490,7 @@ def main():
             raw = sys.stdin.read(MAX_DOCUMENT + 1)
             check(len(raw) <= MAX_DOCUMENT, "请求过大")
             payload = rpc_payload(raw)
-            result = queue_job(method, payload) if method in LONG_METHODS else dispatch(method, payload)
+            result = queue_job(method, payload) if background(method, payload) else dispatch(method, payload)
             from .transport import response
             print(response(result, chunk_reply=method == 'transfer_read'))
         elif len(args) == 3 and args[0] == "job-run":

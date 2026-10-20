@@ -81,7 +81,7 @@ def main():
         raise SystemExit("Run only in the disposable VM with FII_VM_TEST=1")
     sys.path.insert(0, "/usr/lib")
     from fii.model import defaults
-    from fii.runtime import activate
+    from fii.runtime import activate, status
     from fii.store import Store
     script = str(Path(__file__).resolve())
     results = []
@@ -112,11 +112,15 @@ def main():
 
     def configure(**changes):
         data = copy.deepcopy(base)
+        stack = changes.pop('tunStack', 'mixed')
         if changes.pop("direct", False):
             data["overrides"][0]["body"] = "rules!: ['MATCH,DIRECT']\n"
+        data['overrides'][0]['body'] += '\nipv6: true\ndns: {ipv6: true, enhanced-mode: fake-ip}\ntun: {stack: ' + stack + '}\n'
         data["settings"].update(changes)
         Store().save(data, Store().read()["revision"])
         activate("vm-settings-test")
+        if not status()['running']:
+            run('/etc/init.d/fii', 'start')  # Explicit fixture startup for forwarding tests.
 
     def expect(name, kind="tcp", client=False, success=True, ipv6=False, env=None, host=None):
         cmd = ["python3", script, "--probe", kind, host or ("2001:db8:230::2" if ipv6 else "198.19.0.2")]
@@ -158,7 +162,7 @@ def main():
         process = subprocess.Popen(["ip", "netns", "exec", "fii-server", "python3", script, "--server"])
         time.sleep(2)
         base = defaults()
-        base["settings"].update(interfaces=["fii-lan"], routerProxy=True, dnsMode="fake-ip")
+        base["settings"].update(interfaces=["fii-lan"], routerProxy=True)
         base["settings"]["reservedIpv6"].remove("2001:db8::/32")
         base["sources"] = [{"id": "vm-source", "name": "VM fixture", "cachedYaml": "proxies:\n - {name: Test, type: ss, server: 127.0.0.1, port: 9, cipher: aes-128-gcm, password: test}\n"}]
         base["overrides"] = [{"id": "vm-rules", "name": "VM rejection proof", "type": "YAML", "body": "rules!:\n - DST-PORT,18080,REJECT\n - DST-PORT,18081,REJECT\n - MATCH,DIRECT\n"}]

@@ -253,6 +253,7 @@ class PersistenceTests(unittest.TestCase):
         previous = {"outputId": "previous", "name": "Old", "yaml": "old", "settings": model.defaults()["settings"]}
         write_json(rooted("/etc/fii/active.json"), previous)
         with patch.object(runtime, "core_test"), patch.object(runtime, "run"), \
+                patch.object(runtime, "service_active", return_value=True), \
                 patch.object(runtime, "restart_and_wait", side_effect=[ValueError("failed"), None]) as restart:
             with self.assertRaisesRegex(ValueError, "恢复上一次"):
                 runtime.activate("p1")
@@ -262,6 +263,7 @@ class PersistenceTests(unittest.TestCase):
     def test_first_apply_failure_cleans_up(self):
         self.save_sample()
         with patch.object(runtime, "core_test"), patch.object(runtime, "run") as run, \
+                patch.object(runtime, "service_active", return_value=True), \
                 patch.object(runtime, "restart_and_wait", side_effect=ValueError("failed")):
             with self.assertRaises(ValueError):
                 runtime.activate("p1")
@@ -278,10 +280,55 @@ class PersistenceTests(unittest.TestCase):
 
     def test_successful_apply_records_revision_and_boot_preference(self):
         data = self.save_sample()
-        with patch.object(runtime, "core_test"), patch.object(runtime, "restart_and_wait"), patch.object(runtime, "run") as run:
+        with patch.object(runtime, "core_test"), patch.object(runtime, "service_active", return_value=True), patch.object(runtime, "restart_and_wait"), patch.object(runtime, "run") as run:
             runtime.activate("p1")
         self.assertEqual(runtime.active()["revision"], data["revision"])
         run.assert_called_with([runtime.INIT, "disable"])
+
+    def test_stopped_apply_updates_revision_without_starting_or_restarting(self):
+        data = self.save_sample()
+        previous = {'outputId':'old', 'name':'Old', 'yaml':'old', 'settings':data['settings'], 'revision':0}
+        write_json(rooted('/etc/fii/active.json'), previous)
+        with patch.object(runtime, 'core_test'), patch.object(runtime, 'service_active', return_value=False), \
+                patch.object(runtime, 'restart_and_wait') as restart, patch.object(runtime, 'run') as run:
+            result = runtime.activate('p1')
+        self.assertFalse(result['restarted'])
+        self.assertIn('保持停止', result['message'])
+        self.assertEqual(runtime.active()['revision'], data['revision'])
+        self.assertEqual(json.loads(rooted('/etc/fii/active.previous.json').read_text()), previous)
+        restart.assert_not_called()
+        self.assertEqual([call.args[0] for call in run.call_args_list], [[runtime.INIT, 'disable']])
+        self.assertFalse(rooted('/tmp/fii/ready').exists())
+
+    def test_first_apply_while_stopped_creates_snapshot_without_start(self):
+        self.save_sample()
+        with patch.object(runtime, 'core_test'), patch.object(runtime, 'service_active', return_value=False), \
+                patch.object(runtime, 'restart_and_wait') as restart, patch.object(runtime, 'run'):
+            result = runtime.activate('p1')
+        self.assertIsNotNone(runtime.active())
+        self.assertFalse(result['restarted'])
+        restart.assert_not_called()
+
+    def test_unknown_service_state_does_not_replace_snapshot(self):
+        self.save_sample()
+        previous = {'outputId':'old', 'yaml':'old'}
+        write_json(rooted('/etc/fii/active.json'), previous)
+        with patch.object(runtime, 'core_test'), patch.object(runtime, 'service_active', side_effect=ValueError('unknown')), \
+                patch.object(runtime, 'restart_and_wait') as restart, self.assertRaisesRegex(ValueError, 'unknown'):
+            runtime.activate('p1')
+        self.assertEqual(runtime.active(), previous)
+        restart.assert_not_called()
+
+    def test_service_state_includes_starting_or_respawning_instances(self):
+        for response, expected in [('{}', False), ('{"fii":{"instances":{}}}',False),
+                ('{"fii":{"instances":{"mihomo":{"running":true}}}}', True),
+                ('{"fii":{"instances":{"mihomo":{"running":false,"command":["/usr/libexec/fii/core-run"]}}}}',True)]:
+            with self.subTest(response=response), patch.object(runtime,'run',return_value=response):
+                self.assertEqual(runtime.service_active(), expected)
+        for response in ('invalid', '[]', '{"fii":null}', '{"fii":{"instances":null}}', '{"fii":{"instances":{"mihomo":null}}}'):
+            with self.subTest(response=response), patch.object(runtime,'run',return_value=response), \
+                    self.assertRaisesRegex(ValueError, '无法确认 FII 服务状态'):
+                runtime.service_active()
 
     def test_scheduler_honors_retry_backoff(self):
         data = self.save_sample()
@@ -402,12 +449,12 @@ class NetworkGenerationTests(unittest.TestCase):
 
     def test_old_settings_keep_scope_and_dns_on_read(self):
         data = sample()
-        for key in ("lanProxy", "routerProxy", "udpProxy", "dnsMode", "dnsIpv6Hijack"):
+        for key in ("lanProxy", "routerProxy", "udpProxy", "dnsIpv6Hijack"):
             del data["settings"][key]
         settings = model.validate(data)["settings"]
         self.assertTrue(settings["lanProxy"])
         self.assertFalse(settings["routerProxy"])
-        self.assertEqual(settings["dnsMode"], "fake-ip")
+        self.assertNotIn("dnsMode", settings)
         self.assertNotIn("hook output", runtime.nftables(settings))
 
     def test_router_proxy_has_loop_prevention_and_loopback_tproxy(self):
@@ -444,11 +491,11 @@ class NetworkGenerationTests(unittest.TestCase):
         self.assertIn("th dport 53 counter redirect", nft)
         self.assertNotIn("meta mark set 0x0000f101", nft)
 
-    def test_dns_options_are_owned_and_independent(self):
+    def test_mihomo_dns_policy_is_independent_of_router_traffic_settings(self):
         settings = model.defaults()["settings"]
         settings.update(ipv6=True, dnsIpv6Hijack=False, routerProxy=True, routerDnsHijack=False, dnsMode="redir-host",
                         proxyNameservers=["1.1.1.1"], defaultNameservers=["8.8.8.8"], localDns="127.0.0.1:5353", fakeIpFilter=["+.example.com"])
-        cfg = render.load_map(runtime.overlay("dns: {enhanced-mode: fake-ip}", settings))["dns"]
+        cfg = render.load_map(runtime.overlay("ipv6: false\ndns: {ipv6: true, enhanced-mode: redir-host, fake-ip-filter: ['+.example.com'], proxy-server-nameserver: [1.1.1.1], default-nameserver: [8.8.8.8], nameserver-policy: {'+.lan': ['127.0.0.1:5353']}}", settings))["dns"]
         self.assertEqual(cfg["enhanced-mode"], "redir-host")
         self.assertEqual(cfg["fake-ip-filter"], ["+.example.com"])
         self.assertEqual(cfg["proxy-server-nameserver"], ["1.1.1.1"])
@@ -476,7 +523,7 @@ class NetworkGenerationTests(unittest.TestCase):
         self.assertEqual(config["routing-mark"], 0xF100)
         self.assertEqual(config["external-controller"], "127.0.0.1:9090")
         self.assertEqual(config["listeners"][0]["listen"], "127.0.0.1")
-        self.assertEqual(config["dns"]["proxy-server-nameserver"], settings["nameservers"])
+        self.assertEqual(config["dns"]["proxy-server-nameserver"], config["dns"]["nameserver"])
         self.assertEqual(config["dns"]["nameserver-policy"]["+.lan"], ["127.0.0.1:53"])
 
     def test_firewall_only_intercepts_selected_lan(self):
@@ -513,7 +560,7 @@ class NetworkGenerationTests(unittest.TestCase):
 
     def test_firewall_reload_replaces_own_table_atomically(self):
         with TestDirectory() as tmp, patch.dict(os.environ, {"FII_ROOT": tmp}):
-            bundle = {"settings": model.defaults()["settings"]}
+            bundle = {"settings": model.defaults()["settings"], "yaml": ""}
             def command(args, **kw):
                 return "table inet fii" if args == ["/usr/sbin/nft", "list", "tables"] else ""
             with patch.object(runtime, "active", return_value=bundle), patch.object(runtime, "ready", return_value=True), patch.object(runtime, "run", side_effect=command) as run:
@@ -529,7 +576,7 @@ class NetworkGenerationTests(unittest.TestCase):
                 if args[:2] == ["/usr/sbin/nft", "-f"]:
                     raise ValueError("nft failed")
                 return ""
-            with patch.object(runtime, "active", return_value={"settings": model.defaults()["settings"]}), \
+            with patch.object(runtime, "active", return_value={"settings": model.defaults()["settings"], "yaml": ""}), \
                     patch.object(runtime, "ready", return_value=True), patch.object(runtime, "run", side_effect=command) as run:
                 with self.assertRaises(ValueError):
                     runtime.firewall_up()

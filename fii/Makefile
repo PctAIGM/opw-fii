@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fii
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=17
+PKG_RELEASE:=29
 PKG_LICENSE:=GPL-3.0-or-later
 PKGARCH:=all
 
@@ -12,7 +12,7 @@ define Package/fii
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Simple Mihomo configuration manager for OpenWrt
-  DEPENDS:=+python3 +python3-yaml +node +ca-bundle +firewall4 +ip-full +kmod-nft-tproxy +kmod-nft-socket +kmod-tun +kmod-dummy
+  DEPENDS:=+python3 +python3-yaml +node +ucode +ucode-mod-fs +ucode-mod-ubus +ucode-mod-uloop +rpcd-mod-ucode +rpcd-mod-file +uclient-fetch +ca-bundle +firewall4 +ip-full +kmod-nft-tproxy +kmod-nft-socket +kmod-tun +kmod-dummy
 endef
 
 define Package/fii/description
@@ -25,7 +25,7 @@ endef
 define Package/fii/install
 	$(CP) ./files/* $(1)/
 	chmod 0755 $(1)/etc/init.d/fii $(1)/etc/uci-defaults/90-fii $(1)/usr/bin/fii
-	chmod 0755 $(1)/usr/libexec/rpcd/luci.fii $(1)/usr/libexec/fii/*
+	chmod 0755 $(1)/usr/libexec/rpcd/luci.fii.worker $(1)/usr/libexec/fii/*
 	find $(1)/usr/lib/fii -name '__pycache__' -type d -exec rm -rf {} +
 endef
 

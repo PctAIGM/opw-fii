@@ -76,8 +76,8 @@ class ProxyOptionsTests(unittest.TestCase):
     def test_tun_overlay_and_marks_do_not_enable_global_auto_route(self):
         from fii.render import load_map
         s = model.defaults()["settings"]
-        s.update(tcpMode="redirect", udpMode="tun", tunStack="system", tunMtu=1400)
-        cfg = load_map(runtime.overlay("tun: {auto-route: true, auto-redirect: true}", s))
+        s.update(tcpMode="redirect", udpMode="tun")
+        cfg = load_map(runtime.overlay("tun: {auto-route: true, auto-redirect: true, stack: system, mtu: 1400}", s))
         self.assertTrue(cfg["tun"]["enable"])
         self.assertFalse(cfg["tun"]["auto-route"])
         self.assertFalse(cfg["tun"]["auto-redirect"])

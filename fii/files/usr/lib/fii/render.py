@@ -1,7 +1,9 @@
 """Mihomo renderer. Semantics follow sub-converter-flutter/mihomo_yaml_service.dart."""
 import base64
 import copy
+import hashlib
 import json
+import os
 import re
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -27,6 +29,29 @@ rules:
 class Loader(getattr(yaml, 'CSafeLoader', yaml.SafeLoader)):
     """YAML 1.2-like booleans: node names ON / OFF must stay strings."""
 
+    def construct_mapping(self, node, deep=False):
+        result = super().construct_mapping(node, deep=deep)
+        # REALITY IDs are hexadecimal text, not YAML numbers. Reading the scalar
+        # spelling here retains leading zeroes/octal-looking digits before JS
+        # or JSON can lose them. Do not mutate shared alias nodes or resolvers.
+        for key, value in reversed(node.value):
+            if key.tag == 'tag:yaml.org,2002:str' and key.value == 'short-id':
+                if value.tag in ('tag:yaml.org,2002:str', 'tag:yaml.org,2002:int', 'tag:yaml.org,2002:float'):
+                    result['short-id'] = value.value
+                break
+        return result
+
+
+class Dumper(getattr(yaml, 'CSafeDumper', yaml.SafeDumper)):
+    def represent_mapping(self, tag, mapping, flow_style=None):
+        node = super().represent_mapping(tag, mapping, flow_style=flow_style)
+        # SafeDumper's YAML 1.1 resolver would leave 0089-like strings bare,
+        # while other YAML implementations may read them as numbers.
+        for key, value in node.value:
+            if key.value == 'short-id' and value.tag == 'tag:yaml.org,2002:str':
+                value.style = "'"
+        return node
+
 
 Loader.yaml_implicit_resolvers = copy.deepcopy(yaml.SafeLoader.yaml_implicit_resolvers)
 for key, resolvers in Loader.yaml_implicit_resolvers.items():
@@ -50,7 +75,7 @@ def load_map(body):
 
 
 def dump(data):
-    return yaml.dump(data, Dumper=getattr(yaml, 'CSafeDumper', yaml.SafeDumper), allow_unicode=True, sort_keys=False, width=120)
+    return yaml.dump(data, Dumper=Dumper, allow_unicode=True, sort_keys=False, width=120)
 
 
 def decode64(value):
@@ -124,6 +149,41 @@ def parse_link(line):
 
 
 def extract(body):
+    # Subscription YAML changes far less often than editors/previews are opened.
+    # Cache only parsed nodes in tmpfs, keyed by content (never source ID/name).
+    from .store import rooted, lock, write_json
+    if os.name == 'nt' and not os.environ.get('FII_ROOT'):
+        return extract_uncached(body)
+    digest = hashlib.sha256(body.encode('utf-8')).hexdigest()
+    directory = rooted('/tmp/fii/node-cache-v1')
+    path = directory / (digest + '.json')
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(value, list) and all(isinstance(p, dict) and isinstance(p.get('name'), str) and p['name'] for p in value):
+            return value
+    except (OSError, ValueError):
+        pass
+    value = extract_uncached(body)
+    # Bounded RAM usage; failure to cache must not prevent validation/rendering.
+    try:
+        with lock('node-cache'):
+            directory.mkdir(parents=True, exist_ok=True)
+            files = sorted(directory.glob('*.json'), key=lambda p: p.stat().st_mtime)
+            size = sum(p.stat().st_size for p in files)
+            encoded_size = len((json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode())
+            if encoded_size > 32 * 1024 * 1024:
+                return value
+            while files and (len(files) >= 32 or size + encoded_size > 32 * 1024 * 1024):
+                old = files.pop(0)
+                size -= old.stat().st_size
+                old.unlink(missing_ok=True)
+            write_json(path, value)
+    except (OSError, ValueError):
+        pass
+    return value
+
+
+def extract_uncached(body):
     body = body.strip()
     try:
         root = load_map(body)
@@ -235,23 +295,35 @@ def render(data, output_id, progress=None):
             proxies.append(p)
     names = [p["name"] for p in proxies]
     root = expand(load_map(BASE), names or ["DIRECT"])
+    from .mihomo import seed
+    seed(root)
     root["proxies"] = proxies
     overrides = {o["id"]: o for o in data["overrides"]}
     ordered_ids = list(dict.fromkeys([o["id"] for o in data["overrides"] if o.get("global")] + output["overrideIds"]))
     applied = []
-    for ident in ordered_ids:
-        override = overrides[ident]
-        if not override.get("enabled", True):
-            continue
+    enabled = [overrides[ident] for ident in ordered_ids if overrides[ident].get('enabled', True)]
+    index = 0
+    while index < len(enabled):
+        override = enabled[index]
         if progress:
             progress('正在执行覆写 %d：%s' % (len(applied) + 1, override['name']))
         applied.append({key: override.get(key) for key in ('id', 'name', 'type', 'global')})
         if override["type"] == "JS":
-            from .javascript import execute
+            from .javascript import execute_many
+            batch = [override]
+            while index + 1 < len(enabled) and enabled[index + 1]['type'] == 'JS':
+                index += 1
+                item = enabled[index]
+                batch.append(item)
+                applied.append({key: item.get(key) for key in ('id', 'name', 'type', 'global')})
+                if progress:
+                    progress('正在执行覆写 %d：%s' % (len(applied), item['name']))
             try:
-                root = execute(override.get('body', ''), root)
+                root = execute_many(batch, root)
             except ValueError as exc:
-                raise ValueError('JS 覆写「%s」失败: %s' % (override['name'], exc)) from None
+                if len(batch) == 1:
+                    raise ValueError('JS 覆写「%s」失败: %s' % (override['name'], exc)) from None
+                raise
         elif override["type"] == "YAML":
             validate_override(override)
             merge(root, expand(load_map(override.get("body", "")), names))
@@ -260,6 +332,8 @@ def render(data, output_id, progress=None):
             rules = [s.strip() for s in override.get("body", "").splitlines()
                      if s.strip() and not s.lstrip().startswith("#")]
             root["rules"] = rules + root.get("rules", [])
+        index += 1
+    seed(root, final=True)
     check(isinstance(root.get('proxies', []), list), '生成配置的 proxies 必须是列表')
     if progress:
         progress('正在生成 YAML…')

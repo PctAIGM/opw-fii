@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Keep slow configuration work in rpcd's asynchronous exec backend.
+import { connect } from 'ubus';
+const bus = connect(getenv('FII_RPC_BUS') || null);
+const api = loadfile('/usr/share/fii/rpc.uc')();
+const methods = {};
+for (let name in api.methods) {
+    const method = name;
+    methods[method] = {
+        args: { payload: '' },
+        call: function(request) {
+            let replied = false;
+            function send(value) { if (!replied) { replied = true; request.reply(value); } }
+            const context = {
+                reply: send,
+                defer: type(request.defer) == 'function' ? () => request.defer() : null,
+                worker: function(operation, payload, done) {
+                    const pending = bus?.defer?.('luci.fii.worker', operation, { payload: sprintf('%J', payload) }, function(code, result) {
+                        try { done(code ? { ok: false, error: 'FII 后台执行失败，请查看日志' } : result); }
+                        catch (e) { send({ ok: false, error: 'FII 后台响应处理失败，请重新载入' }); }
+                    });
+                    if (!pending) done({ ok: false, error: 'FII 后台执行器尚未就绪，请稍后重试' });
+                    return pending;
+                },
+                call: function(object, operation, payload, done) {
+                    const pending = bus?.defer?.(object, operation, payload, function(code, result) {
+                        try { done(code, result); }
+                        catch (e) { send({ ok: false, error: 'FII 系统查询失败，请重新载入' }); }
+                    });
+                    if (!pending) return done(UBUS_STATUS_NOT_FOUND, {});
+                    return pending;
+                }
+            };
+            return api.call(method, request.args.payload, context);
+        }
+    };
+}
+return { 'luci.fii': methods };

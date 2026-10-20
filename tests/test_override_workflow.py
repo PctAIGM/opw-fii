@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from test_fii import TestDirectory, sample
-from fii import cli, model, render
+from fii import cli, model, render, runtime
 from fii.store import Store
 
 
@@ -121,3 +121,55 @@ class OverrideWorkflowTests(unittest.TestCase):
         self.assertEqual(render.load_map(render.dump(parsed)), parsed)
         with self.assertRaisesRegex(ValueError, '别名过多'):
             render.load_map(text.replace('items: [', 'items: [*node,'))
+
+    def test_runtime_preserves_common_dns_and_tun_override_options(self):
+        data = sample()
+        patch_config = {
+            'tcp-concurrent': False, 'find-process-mode': 'always', 'geo-auto-update': True,
+            'profile': {'store-selected': False, 'store-fake-ip': False},
+            'dns': {'nameserver': ['https://resolver.example/dns-query'],
+                    'default-nameserver': ['9.9.9.9'], 'proxy-server-nameserver': ['1.1.1.1'],
+                    'fake-ip-filter': [], 'prefer-h3': True,
+                    'nameserver-policy': {'+.example.com': ['8.8.8.8']}},
+            'tun': {'stack': 'system', 'mtu': 1400, 'endpoint-independent-nat': True},
+        }
+        data['overrides'] = [{'id': 'dns', 'name': 'Common and DNS', 'type': 'JS', 'global': True,
+                              'body': 'function main(config) { return Object.assign(config, ' + json.dumps(patch_config) + '); }'}]
+        saved = Store().save(data, Store().read()['revision'])
+        before = copy.deepcopy(saved)
+        result = cli.dispatch('preview', {'id': 'p1', 'runtime': True})
+        actual = render.load_map(result['yaml'])
+        self.assertFalse(any('dns.nameserver-policy' in warning for warning in result['warnings']))
+        for key in ('tcp-concurrent', 'find-process-mode', 'geo-auto-update', 'profile'):
+            self.assertEqual(actual[key], patch_config[key])
+        for section in ('dns', 'tun'):
+            for key, value in patch_config[section].items():
+                if key == 'nameserver-policy':
+                    self.assertEqual(actual[section][key]['+.example.com'], value['+.example.com'])
+                else:
+                    self.assertEqual(actual[section][key], value)
+        self.assertEqual(Store().read(), before)
+
+    def test_missing_node_dns_follows_effective_override_nameserver(self):
+        cfg = render.load_map(runtime.overlay('dns:\n  nameserver: [1.1.1.1]\n', model.defaults()['settings']))
+        self.assertEqual(cfg['dns']['proxy-server-nameserver'], ['1.1.1.1'])
+        from fii.mihomo import DEFAULTS
+        self.assertEqual(cfg['dns']['default-nameserver'], DEFAULTS['dns']['default-nameserver'])
+
+    def test_integration_changes_are_reported_without_leaking_secret_values(self):
+        body = 'secret: private-script-secret\nexternal-controller: 0.0.0.0:8888\ntun: {enable: true, auto-route: true}\ndns: {listen: ":53", enhanced-mode: redir-host}\n'
+        warnings = []
+        cfg = render.load_map(runtime.overlay(body, model.defaults()['settings'], warnings=warnings))
+        self.assertFalse(cfg['tun']['enable'])
+        self.assertFalse(cfg['tun']['auto-route'])
+        self.assertEqual(cfg['external-controller'], '127.0.0.1:9090')
+        self.assertEqual(cfg['dns']['enhanced-mode'], 'redir-host')
+        for key in ('secret', 'external-controller', 'tun.enable', 'tun.auto-route', 'dns.listen'):
+            self.assertIn(key, warnings[0])
+        self.assertNotIn('dns.enhanced-mode', warnings[0])
+        self.assertNotIn('private-script-secret', warnings[0])
+
+    def test_invalid_tun_and_profile_objects_fail_instead_of_discarding_override(self):
+        for body in ('tun: null', 'tun: []', 'profile: null', 'profile: false'):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, '覆写必须是对象'):
+                runtime.overlay(body, model.defaults()['settings'])

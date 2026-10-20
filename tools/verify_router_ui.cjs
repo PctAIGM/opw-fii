@@ -58,7 +58,9 @@ const path = require('node:path');
     async function waitApplied(before) {
         await page.waitForFunction(() => !Array.from(document.querySelectorAll('.fii-settings-save button')).some(x => x.disabled), null, {timeout:45000});
         const data = (await rpc('get')).data;
-        const status = await rpc('status');
+        let status = await rpc('status');
+        // This VM driver explicitly starts the core for its forwarding checks.
+        if (!status.running) { await rpc('service', {action:'start'}); status = await rpc('status'); }
         assert.ok(data.revision > before);
         assert.equal(status.appliedRevision, data.revision);
         assert.equal(status.running, true);
@@ -81,7 +83,7 @@ const path = require('node:path');
         });
         await result('save and apply router proxy from LuCI', async () => {
             await page.getByRole('checkbox', {name:'代理路由器本机', exact:true}).check();
-            await page.getByRole('button', {name:'保存并应用', exact:true}).click();
+            await page.getByRole('button', {name:'保存并更新配置', exact:true}).click();
             const saved = await waitApplied(original.revision);
             assert.equal(saved.data.settings.routerProxy, true);
             assert.equal(saved.status.routerProxy, true);
@@ -91,7 +93,7 @@ const path = require('node:path');
             await page.getByRole('combobox', {name:'TCP 代理方式', exact:true}).selectOption('redirect');
             await page.getByRole('combobox', {name:'UDP 代理方式', exact:true}).selectOption('tun');
             const before = (await rpc('get')).data.revision;
-            await page.getByRole('button', {name:'保存并应用', exact:true}).click();
+            await page.getByRole('button', {name:'保存并更新配置', exact:true}).click();
             const saved = await waitApplied(before);
             assert.deepEqual(saved.status.protocols, {tcp:'redirect',udp:'tun'});
         });
@@ -105,26 +107,29 @@ const path = require('node:path');
             await page.getByRole('button', {name:'确定', exact:true}).click();
             for (let index=beforeRules+1; index>1; index--) await page.getByRole('button', {name:'上移规则 '+index, exact:true}).click();
             const before = (await rpc('get')).data.revision;
-            await page.getByRole('button', {name:'保存并应用', exact:true}).click();
+            await page.getByRole('button', {name:'保存并更新配置', exact:true}).click();
             const saved = await waitApplied(before);
             assert.equal(saved.data.settings.routerRules[0].proxy, false);
             assert.equal(saved.data.settings.routerRules[0].dns, true);
             assert.deepEqual(saved.data.settings.routerRules[0].users, ['0']);
             await screenshot('router-settings-router-acl.png');
         });
-        await result('DNS mode keeps values across setting tabs', async () => {
-            await page.getByRole('button', {name:'DNS', exact:true}).click();
-            await page.getByRole('combobox', {name:'DNS 模式', exact:true}).selectOption('redir-host');
-            assert.equal(await page.getByRole('group', {name:'Fake-IP 过滤域名', exact:true}).isVisible(), false);
-            await page.getByRole('textbox', {name:'添加节点域名 DNS', exact:true}).fill('1.1.1.1');
+        await result('router DNS interception is separate from Mihomo policy', async () => {
+            await page.getByRole('button', {name:'DNS 接管', exact:true}).click();
+            assert.equal(await page.getByRole('combobox', {name:'DNS 模式', exact:true}).count(), 0);
+            assert.equal(await page.getByRole('textbox', {name:'添加节点域名 DNS', exact:true}).count(), 0);
+            const checkbox = page.getByRole('checkbox', {name:'接管路由器本机 DNS', exact:true});
+            const enabled = await checkbox.isChecked();
+            await checkbox.setChecked(!enabled);
             await page.getByRole('button', {name:'运行设置', exact:true}).click();
-            await page.getByRole('button', {name:'DNS', exact:true}).click();
-            assert.equal(await page.getByRole('textbox', {name:'添加节点域名 DNS', exact:true}).inputValue(), '1.1.1.1');
+            await page.getByRole('button', {name:'DNS 接管', exact:true}).click();
+            assert.equal(await checkbox.isChecked(), !enabled);
             const before = (await rpc('get')).data.revision;
-            await page.getByRole('button', {name:'保存并应用', exact:true}).click();
+            await page.getByRole('button', {name:'保存并更新配置', exact:true}).click();
             const saved = await waitApplied(before);
-            assert.equal(saved.data.settings.dnsMode, 'redir-host');
-            assert.deepEqual(saved.data.settings.proxyNameservers, ['1.1.1.1']);
+            assert.equal(saved.data.settings.routerDnsHijack, !enabled);
+            assert.equal('dnsMode' in saved.data.settings, false);
+            assert.equal('proxyNameservers' in saved.data.settings, false);
         });
         await result('backend validation preserves state on invalid device address', async () => {
             await page.getByRole('button', {name:'局域网代理', exact:true}).click();
@@ -145,7 +150,7 @@ const path = require('node:path');
             await page.getByRole('textbox', {name:'添加绕过 DSCP', exact:true}).fill('4');
             await page.getByRole('textbox', {name:'添加绕过 FWMark', exact:true}).fill('0x100/0xff00');
             const before = (await rpc('get')).data.revision;
-            await page.getByRole('button', {name:'保存并应用', exact:true}).click();
+            await page.getByRole('button', {name:'保存并更新配置', exact:true}).click();
             const saved = await waitApplied(before);
             assert.equal(saved.data.settings.bypassChina4, true);
             assert.deepEqual(saved.data.settings.bypassDscp, ['4']);

@@ -4,6 +4,7 @@ import hashlib
 import gzip
 import io
 import json
+import re
 from pathlib import Path
 import tarfile
 
@@ -63,6 +64,18 @@ def verify():
                     if member.name == './etc/uci-defaults/90-fii':
                         assert b'/etc/init.d/rpcd reload' in data and b'/etc/init.d/rpcd restart' not in data
                 assert "./usr/bin/mihomo" not in names and "./etc/fii/bin/mihomo" not in names
+                if record['file'].startswith('fii_'):
+                    assert './usr/share/rpcd/ucode/luci.fii' in names
+                    assert './usr/share/fii/rpc.uc' in names
+                    assert './usr/libexec/rpcd/luci.fii.worker' in names
+                    assert './usr/libexec/rpcd/luci.fii' not in names, 'Duplicate public RPC registrations'
+                    for dependency in ('rpcd-mod-ucode', 'rpcd-mod-file', 'ucode-mod-fs', 'ucode-mod-ubus', 'ucode-mod-uloop', 'uclient-fetch'):
+                        assert dependency in depends
+                else:
+                    style = archive.extractfile('./www/luci-static/resources/fii/style.css').read()
+                    view = archive.extractfile('./www/luci-static/resources/view/fii/app.js').read()
+                    marker = re.search(rb"var fiiStyleHash = '([0-9a-f]{16})';", view)
+                    assert marker and marker[1].decode() == hashlib.sha256(style).hexdigest()[:16], 'UI stylesheet cache version must match the packaged CSS'
         result.append({"package": record["file"], "entries": len(names), "verified": True})
     print(json.dumps(result, indent=2))
     return result

@@ -4,11 +4,12 @@ import gzip
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.1-17"
+VERSION = "0.1.1-29"
 EPOCH = 1792339200  # 2026-10-19 00:00 UTC, deterministic archive timestamps.
 
 
@@ -71,6 +72,16 @@ def build(name, entries, depends, arch="all", version=VERSION, controls=None):
 
 
 def main():
+    # The reproducible tar mtime is not a cache key. Keep the shipped source
+    # content-addressed so upgrades and same-version rebuilds get fresh CSS.
+    resources = ROOT / 'luci-app-fii/htdocs/luci-static/resources'
+    style_hash = hashlib.sha256((resources / 'fii/style.css').read_bytes().replace(b'\r\n', b'\n')).hexdigest()[:16]
+    view_path = resources / 'view/fii/app.js'
+    source = view_path.read_bytes().replace(b'\r\n', b'\n')
+    updated, count = re.subn(rb"var fiiStyleHash = '[0-9a-f]{16}';", b"var fiiStyleHash = '" + style_hash.encode() + b"';", source)
+    assert count == 1, 'Missing or duplicate UI style hash marker'
+    if updated != source:
+        view_path.write_bytes(updated)
     postinst = b'''#!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
 /bin/sh /etc/uci-defaults/90-fii && rm -f /etc/uci-defaults/90-fii
@@ -92,7 +103,7 @@ uci commit firewall
 exit 0
 '''
     manifest = [build("fii", collect(ROOT / "fii/files"),
-                      "python3, python3-yaml, node, ca-bundle, firewall4, ip-full, kmod-nft-tproxy, kmod-nft-socket, kmod-tun, kmod-dummy",
+                      "python3, python3-yaml, node, ucode, ucode-mod-fs, ucode-mod-ubus, ucode-mod-uloop, rpcd-mod-ucode, rpcd-mod-file, uclient-fetch, ca-bundle, firewall4, ip-full, kmod-nft-tproxy, kmod-nft-socket, kmod-tun, kmod-dummy",
                       controls=[("postinst", postinst, 0o755), ("prerm", prerm, 0o755), ("postrm", postrm, 0o755)])]
     luci_entries = collect(ROOT / "luci-app-fii/root") + collect(ROOT / "luci-app-fii/htdocs", "www/")
     luci_postinst = b'''#!/bin/sh
@@ -102,7 +113,7 @@ rm -rf /tmp/luci-modulecache
 /etc/init.d/rpcd reload
 exit 0
 '''
-    manifest.append(build("luci-app-fii", luci_entries, "fii, luci-base", controls=[("postinst", luci_postinst, 0o755)]))
+    manifest.append(build("luci-app-fii", luci_entries, "fii, luci-base, cgi-io", controls=[("postinst", luci_postinst, 0o755)]))
     manifest_path = ROOT / "dist/manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (ROOT / "dist/SHA256SUMS").write_text("".join(item["sha256"] + "  " + item["file"] + "\n" for item in manifest), encoding="utf-8")

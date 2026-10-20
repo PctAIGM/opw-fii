@@ -73,19 +73,35 @@ def lock(name="state", timeout=10):
 class Store:
     def __init__(self):
         self.path = rooted("/etc/fii/state.json")
+        self.snapshot = None
+
+    def signature(self):
+        stat = self.path.stat()
+        return (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
     def read(self):
         if self.path.exists():
-            return validate(json.loads(self.path.read_text(encoding="utf-8")))
-        data = defaults()
-        write_json(self.path, data)
+            stamp = self.signature()
+            data = validate(json.loads(self.path.read_text(encoding="utf-8")))
+            self.snapshot = (stamp, data['revision']) if stamp == self.signature() else None
+        else:
+            data = defaults()
+            write_json(self.path, data)
+            self.snapshot = (self.signature(), data['revision'])
         return data
 
-    def save(self, data, expected_revision):
-        current = self.read()
-        if type(expected_revision) is not int or expected_revision != current["revision"]:
+    def save(self, data, expected_revision, validated=False):
+        # Reuse a revision already read by this Store only while the exact file
+        # is unchanged. Callers hold the state lock for this check and replace.
+        if self.snapshot is not None and self.path.exists() and self.signature() == self.snapshot[0]:
+            revision = self.snapshot[1]
+        else:
+            revision = self.read()['revision']
+        if type(expected_revision) is not int or expected_revision != revision:
             raise ValueError("配置已被其他操作更新；请重新载入页面后再保存")
-        data["revision"] = current["revision"] + 1
-        validate(data)
+        data["revision"] = revision + 1
+        if not validated:
+            validate(data)
         write_json(self.path, data)
+        self.snapshot = (self.signature(), data['revision'])
         return data

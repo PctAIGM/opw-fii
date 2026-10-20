@@ -49,17 +49,21 @@ const path=require('node:path');
     async function editScript(name,body) {
         await page.getByRole('button',{name:'覆写',exact:true}).click();
         await page.locator('.fii-card').filter({has:page.getByRole('heading',{name,exact:true})}).getByRole('button',{name:'编辑',exact:true}).click();
+        await page.waitForFunction(expected=>{
+            const modal=document.querySelector('#modal_overlay'),label=Array.from(modal.querySelectorAll('label')).find(x=>x.textContent==='名称');
+            return document.body.classList.contains('modal-overlay-active')&&label&&document.getElementById(label.htmlFor)?.value===expected;
+        },name);
         await page.getByRole('textbox',{name:'覆写内容',exact:true}).fill(body);
         assert.equal(await page.getByRole('textbox',{name:'覆写内容',exact:true}).inputValue(),body);
         assert.deepEqual(await page.locator('.fii-editor').evaluate(form=>Array.from(form.elements).filter(x=>!x.checkValidity()).map(x=>({type:x.type,message:x.validationMessage}))),[]);
         await page.getByRole('button',{name:'保存',exact:true}).click();
     }
     const backup={format:'subconverter-backup',version:1,
-        sources:[{id:7,name:'JS Test Source',prefix:'Test-',cachedYaml:'proxies:\n - {name: HK, type: ss, server: node.example.com, port: 443, cipher: aes-128-gcm, password: test}\n'}],
+        sources:[{id:7,name:'JS Test Source',prefix:'Test-',cachedYaml:'proxies:\n - {name: HK, type: ss, server: node.example.com, port: 443, cipher: aes-128-gcm, password: test}\n - {name: REALITY, type: vless, server: node.example.com, port: 443, uuid: 00000000-0000-4000-8000-000000000001, tls: true, servername: example.com, client-fingerprint: chrome, reality-opts: {public-key: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8, short-id: 00112233}}\n'}],
         templates:[
             {id:1,name:'Global YAML',type:'YAML',global:true,yamlBody:'log-level: warning'},
             {id:2,name:'Global JS',type:'JS',global:true,yamlBody:'const marker=1;function main(c){c.trace=["global"];return c;}'},
-            {id:3,name:'Selected JS',type:'JS',remoteUrl:'https://fii-test-token@raw.githubusercontent.com/tanwov/clash-configs/refs/heads/master/scripts/dns.js',yamlBody:'const marker=2;function main(c){c.trace.push("selected");c.rules.unshift("DOMAIN,example.com,DIRECT");return c;}'},
+            {id:3,name:'Selected JS',type:'JS',remoteUrl:'https://fii-test-token@raw.githubusercontent.com/tanwov/clash-configs/refs/heads/master/scripts/dns.js',yamlBody:'const marker=2;function main(c){if(c.proxies[1]["reality-opts"]["short-id"]!=="00112233")throw Error("REALITY ID changed before JS");c.trace.push("selected");c.rules.unshift("DOMAIN,example.com,DIRECT");return c;}'},
             {id:4,name:'Selected YAML',type:'YAML',yamlBody:'trace+: [yaml]'}],
         outputProfiles:[{id:9,name:'JS Test Output',sourceIds:'7',overrideIds:'4,2,3'}]};
     try {
@@ -93,6 +97,7 @@ const path=require('node:path');
             assert.match(yaml,/trace:\s*- global\s*- yaml\s*- selected/);
             assert.match(yaml,/DOMAIN,example.com,DIRECT/);
             assert.match(yaml,/Test-HK/);
+            assert.match(yaml,/short-id: '00112233'/);
             await page.screenshot({path:path.join(output,'js-override-preview.png')});
             await page.getByRole('button',{name:'关闭',exact:true}).last().click();
         });
@@ -119,16 +124,28 @@ const path=require('node:path');
         });
         await check('JS output validates and activates with the installed Mihomo',async()=>{
             await page.getByRole('button',{name:'输出配置',exact:true}).click();
-            await page.getByRole('button',{name:'应用到路由器',exact:true}).click();
-            await page.waitForFunction(()=>!Array.from(document.querySelectorAll('.fii-body button')).some(x=>x.textContent==='应用到路由器'&&x.disabled),null,{timeout:60000});
+            await page.getByRole('button',{name:'更新运行配置',exact:true}).click();
+            await page.waitForFunction(()=>!Array.from(document.querySelectorAll('.fii-body button')).some(x=>x.textContent==='更新运行配置'&&x.disabled),null,{timeout:60000});
             const status=await rpc('status');
-            assert.equal(status.activeOutputId,'9');assert.equal(status.running,true);
+            assert.equal(status.activeOutputId,'9');
+            // Starting is an explicit fixture action, separate from updating configuration.
+            if (!status.running) await rpc('service',{action:'start'});
+            assert.equal((await rpc('status')).running,true);
+        });
+        await check('an actually invalid REALITY ID reports its node name and preserves the running snapshot',async()=>{
+            const before=await rpc('status');
+            await editScript('Selected JS','function main(c){c.proxies[1]["reality-opts"]["short-id"]="not-hex";return c;}');await waitSaved();
+            await page.getByRole('button',{name:'输出配置',exact:true}).click();
+            await page.getByRole('button',{name:'更新运行配置',exact:true}).click();
+            await page.getByText(/节点「Test-REALITY」（输出第 2 项）的 REALITY short-id 无效/).first().waitFor({timeout:60000});
+            const after=await rpc('status');
+            assert.equal(after.appliedRevision,before.appliedRevision);assert.equal(after.running,true);
         });
         await check('runtime JS error keeps the previously running snapshot',async()=>{
             const before=await rpc('status');
             await editScript('Selected JS','function main(c){throw Error("fixture-boom");}');await waitSaved();
             await page.getByRole('button',{name:'输出配置',exact:true}).click();
-            await page.getByRole('button',{name:'应用到路由器',exact:true}).click();
+            await page.getByRole('button',{name:'更新运行配置',exact:true}).click();
             await page.getByText(/JS 覆写「Selected JS」失败: fixture-boom/).first().waitFor({timeout:60000});
             const after=await rpc('status');
             assert.equal(after.appliedRevision,before.appliedRevision);assert.equal(after.running,true);

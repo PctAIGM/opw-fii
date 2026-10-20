@@ -1,10 +1,8 @@
 """Validated persistent model; mirrors SubConverter's source / override / output flow."""
 import copy
-import ipaddress
 import json
 import re
 import secrets
-from urllib.parse import unquote, urlsplit
 
 MAX_TEXT = 4 * 1024 * 1024
 MAX_DOCUMENT = 16 * 1024 * 1024
@@ -22,14 +20,10 @@ def defaults():
             "mixedPort": 7890, "redirPort": 7893, "tproxyPort": 7895,
             "dnsPort": 1053, "controllerPort": 9090,
             "secret": secrets.token_urlsafe(24), "userAgent": "clash.meta",
-            "nameservers": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
             "bypass": [],
             "lanProxy": True, "routerProxy": False, "udpProxy": True,
             "routerDnsHijack": True, "dnsIpv6Hijack": True,
             "lanAccessMode": "all", "lanAccess": [], "routerBypassUsers": [],
-            "dnsMode": "fake-ip", "fakeIpFilter": ["+.lan", "+.local"],
-            "defaultNameservers": ["223.5.5.5", "119.29.29.29"],
-            "proxyNameservers": [], "localDns": "127.0.0.1:53",
         },
     }
 
@@ -45,6 +39,7 @@ def text(value, label, limit=MAX_TEXT):
 
 
 def github_token(parsed):
+    from urllib.parse import unquote
     if parsed.username is None and parsed.password is None:
         return None
     host = (parsed.hostname or '').lower()
@@ -64,6 +59,7 @@ def url(value, optional=False):
     check(bool(value), "URL 为空；请填写 HTTP(S) 地址，或为本地订阅保留节点缓存")
     check(not any(c in value for c in "\r\n\x00"), "URL 含非法字符")
     check(not any(c.isspace() for c in value), "URL 含空白字符；请去掉空格或使用 URL 编码")
+    from urllib.parse import urlsplit
     try:
         parsed = urlsplit(value)
         hostname = parsed.hostname
@@ -92,9 +88,12 @@ def exhausted(source):
 
 
 def validate(data):
+    import ipaddress
     check(isinstance(data, dict) and data.get("format") == "fii-backup" and data.get("version") == 1,
           "不是 FII v1 配置")
     check(type(data.get("revision")) is int and data["revision"] >= 0, "配置版本号无效")
+    from .mihomo import migrate
+    migrate(data)
     url_errors = []
     for collection in ("sources", "overrides", "outputs"):
         values = data.get(collection)
@@ -155,7 +154,7 @@ def validate(data):
         settings.setdefault(key, setting_defaults[key])
     validate_proxy(settings)
     for key in ("lanProxy", "routerProxy", "udpProxy", "routerDnsHijack", "dnsIpv6Hijack", "lanAccessMode",
-                "lanAccess", "routerBypassUsers", "dnsMode", "fakeIpFilter", "defaultNameservers", "proxyNameservers", "localDns"):
+                "lanAccess", "routerBypassUsers"):
         if key not in settings:
             settings[key] = setting_defaults[key]
     for key in ("autostart", "autoApply", "ipv6", "dnsHijack", "lanProxy", "routerProxy", "udpProxy",
@@ -186,31 +185,10 @@ def validate(data):
     check(isinstance(users, list) and len(users) <= 64 and
           all(isinstance(u, str) and re.fullmatch(r"[0-9]{1,10}", u) and int(u) <= 4294967294 for u in users),
           "绕过用户 UID 无效")
-    check(settings["dnsMode"] in ("fake-ip", "redir-host"), "DNS 模式无效")
-    check(isinstance(settings["fakeIpFilter"], list) and len(settings["fakeIpFilter"]) <= 256, "Fake-IP 过滤列表无效")
-    for domain in settings["fakeIpFilter"]:
-        check(bool(text(domain, "过滤域名", 256).strip()) and not any(c.isspace() for c in domain), "过滤域名不能含空白")
-    check(bool(re.fullmatch(r"127\.0\.0\.1(?::[0-9]{1,5})?", text(settings["localDns"], "本地 DNS", 64))),
-          "本地 DNS 请使用 127.0.0.1 或 127.0.0.1:端口")
-    local_port = int(settings["localDns"].split(":")[1]) if ":" in settings["localDns"] else 53
-    check(1 <= local_port <= 65535 and local_port not in ports, "本地 DNS 端口无效或与 FII 监听端口冲突")
     bypass = settings.get("bypass")
     check(isinstance(bypass, list) and len(bypass) <= 256, "绕过网段无效")
     for network in bypass:
         ipaddress.ip_network(network, strict=False)
-    check(isinstance(settings.get("nameservers"), list) and 1 <= len(settings["nameservers"]) <= 16,
-          "至少设置一个上游 DNS")
-    for key in ("nameservers", "defaultNameservers", "proxyNameservers"):
-        check(isinstance(settings[key], list) and len(settings[key]) <= 16, "DNS 地址列表无效")
-        check(key != "defaultNameservers" or bool(settings[key]), "至少设置一个引导 DNS")
-        for server in settings[key]:
-            text(server, "DNS 地址", 2048)
-            check(bool(server.strip()) and not any(c.isspace() for c in server), "DNS 地址不能含空白")
-            if key == "defaultNameservers":
-                try:
-                    ipaddress.ip_address(server)
-                except ValueError:
-                    raise ValueError("引导 DNS 必须是 IP 地址") from None
     check(len(text(settings.get("secret"), "控制器密钥", 256)) >= 16, "控制器密钥至少 16 字符")
     text(settings.get("userAgent"), "User-Agent", 512)
     check(not any(c in settings["userAgent"] for c in "\r\n"), "User-Agent 不能换行")
@@ -223,6 +201,8 @@ def import_backup(raw, current_settings):
     warnings = []
     if raw.get("format") == "fii-backup":
         result = copy.deepcopy(raw)
+        from .mihomo import migrate
+        migrate(result)
         # Import configuration without unexpectedly changing router network settings or credentials.
         result["settings"] = copy.deepcopy(current_settings)
     else:

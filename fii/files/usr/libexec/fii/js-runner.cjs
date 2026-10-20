@@ -9,6 +9,7 @@ try {
     const input = fs.readFileSync(0, 'utf8');
     if (Buffer.byteLength(input)>13*1024*1024) throw new Error('JS 请求过大');
     const request = JSON.parse(input);
+    function execute(request) {
     const context = vm.createContext(Object.create(null), {
         codeGeneration:{strings:false,wasm:false}, microtaskMode:'afterEvaluate'
     });
@@ -17,7 +18,7 @@ try {
     if (new vm.Script('typeof main === "function"').runInContext(context,options)!==true)
         throw new Error('缺少入口函数 main(config)');
     if (request.validateOnly) {
-        process.stdout.write(JSON.stringify({ok:true}));
+        return null;
     } else {
         // The literal is parsed inside the context so no host object crosses it.
         const literal = JSON.stringify(JSON.stringify(request.config));
@@ -33,7 +34,24 @@ try {
         })()`;
         const output = new vm.Script(code,{filename:'main(config)'}).runInContext(context,options);
         if(typeof output!=='string' || Buffer.byteLength(output)>limit) throw new Error('JS 输出配置超过 8 MiB');
-        process.stdout.write('{"ok":true,"config":'+output+'}');
+        return output;
+    }
+    }
+    if (Array.isArray(request.scripts)) {
+        let config=request.config;
+        for (const item of request.scripts) {
+            try {
+                config=JSON.parse(execute({script:item.script,config}));
+            } catch (error) {
+                let message=String(error && error.message || error).slice(0,1500);
+                if(message.includes('Script execution timed out')) message='JS 覆写执行超时（单阶段最多 2 秒）';
+                throw new Error('JS 覆写「'+item.name+'」失败: '+message);
+            }
+        }
+        process.stdout.write(JSON.stringify({ok:true,config}));
+    } else {
+        const output=execute(request);
+        process.stdout.write(output===null ? '{"ok":true}' : '{"ok":true,"config":'+output+'}');
     }
 } catch(error) {
     let message;

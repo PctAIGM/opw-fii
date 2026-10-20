@@ -12,7 +12,7 @@ OPTIONS = {"proxyEnabled": True, "tcpMode": "inherit", "udpMode": "inherit", "ip
            "dnsIpv4Hijack": True, "dnsFamilyIndependent": False, "fakeIpPing": False, "bypassChina4": False, "bypassChina6": False,
            "tcpPorts": "0-65535", "udpPorts": "0-65535", "bypassDscp": [], "bypassMarks": [],
            "reservedIpv4": RESERVED4, "reservedIpv6": RESERVED6, "lanRules": None, "routerRules": None,
-           "tunStack": "mixed", "tunMtu": 1500, "tunTimeout": 30, "tunInterval": 1}
+           "tunTimeout": 30, "tunInterval": 1}
 MAC = r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"
 
 
@@ -120,7 +120,6 @@ def validate(s):
                         check(bool(re.fullmatch(r"[0-9]{1,10}", value)) and int(value) <= 4294967294, "UID / GID 无效")
                     else:
                         check(len(value) <= 240 and all(re.fullmatch(r"[A-Za-z0-9_:@.-]{1,64}", p) and p not in (".", "..") for p in value.split("/")), "CGroup 路径无效")
-    check(s["tunStack"] in ("mixed", "system", "gvisor"), "TUN 协议栈无效")
-    for key, low, high in (("tunMtu", 1280, 9000), ("tunTimeout", 1, 60), ("tunInterval", 1, 10)):
+    for key, low, high in (("tunTimeout", 1, 60), ("tunInterval", 1, 10)):
         check(type(s[key]) is int and low <= s[key] <= high, key + "超出允许范围")
     check(s["tunInterval"] <= s["tunTimeout"], "TUN 检查间隔不能大于等待时间")

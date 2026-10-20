@@ -6,14 +6,16 @@ const path = require('node:path');
 
 (async () => {
     const output = path.resolve(__dirname, '../build/vm');
-    const browser = await chromium.launch({channel:'chrome',headless:true});
+    const browser = await chromium.launch({channel:'chrome',headless:true,args:['--no-proxy-server']});
     const page = await browser.newPage({viewport:{width:1440,height:1050}});
     const errors = [], requests = [], frames = [], results = [];
-    let confirmationMetrics;
+    let confirmationMetrics, uploadMetrics;
+    let fileUploads=0, rejectedFileUploads=0, lostFileAcknowledgements=0;
     let faultInjection = false, rejectedPosts = 0, rejectedReplies = 0, lostAcknowledgements = 0;
     page.on('pageerror', e => errors.push(e.message));
     page.on('requestfailed', r => { if (!faultInjection) errors.push(r.failure().errorText); });
     page.on('request', r => {
+        if(r.method()==='POST'&&r.url().endsWith('/cgi-upload'))fileUploads++;
         if (r.method() === 'POST' && r.url().includes('ubus')) {
             const bytes=Buffer.byteLength(r.postData() || ''); requests.push(bytes);
             let method;
@@ -78,8 +80,13 @@ const path = require('node:path');
         await page.getByRole('button',{name:'路由器设置',exact:true}).click();
         await page.getByRole('button',{name:'备份与迁移',exact:true}).click();
         await check('2 MiB SubConverter backup preview without oversized XHR', async () => {
+            const from=frames.length,started=performance.now(),beforeUploads=fileUploads;
             await choose(backup);
             await page.getByRole('heading',{name:'确认导入',exact:true}).waitFor({timeout:180000});
+            const uploaded=frames.slice(from);
+            uploadMetrics={checkTotalMilliseconds:Math.round(performance.now()-started),fileUploads:fileUploads-beforeUploads,
+                appendPosts:uploaded.filter(r=>r.method==='transfer_append').length,rpcPosts:uploaded.length};
+            assert.equal(uploadMetrics.fileUploads,1);assert.equal(uploadMetrics.appendPosts,0);
             assert.match(await page.locator('#modal_overlay').innerText(), /1 个订阅、1 个覆写、1 个输出/);
             assert.equal((await rpc('get')).data.revision, original.revision);
             await page.screenshot({path:path.join(output,'backup-preview.png')});
@@ -180,9 +187,59 @@ const path = require('node:path');
             await page.getByRole('button',{name:'路由器设置',exact:true}).click();
             await page.getByRole('button',{name:'备份与迁移',exact:true}).click();
         });
-        await check('1.86 MiB preview retries under 4 KiB POST limit and a lost upload acknowledgement', async () => {
+        await check('native file endpoint rejects an unauthenticated upload without accepting contents',async()=>{
+            const upload=await rpc('transfer_begin',{size:2,fileUpload:true});
+            try {
+                const reply=await page.evaluate(async path=>{
+                    const data=new FormData();data.append('sessionid','0'.repeat(32));data.append('filename',path);
+                    data.append('filedata',new Blob(['{}']),'bad-session.json');
+                    return (await fetch(L.env.cgi_base+'/cgi-upload',{method:'POST',body:data})).json();
+                },upload.uploadPath);
+                assert.ok(reply.failure);
+                assert.deepEqual(await rpc('transfer_status',{id:upload.id}),{received:0,complete:false});
+            }finally{await rpc('transfer_release',{id:upload.id});}
+        });
+        await check('canceling an in-flight native upload releases its reservation and does not import data',async()=>{
+            const before=(await rpc('get')).data.revision;
+            faultInjection=true;
+            let uploaded,unblock;
+            const reached=new Promise(resolve=>uploaded=resolve),gate=new Promise(resolve=>unblock=resolve);
+            await page.route(url=>url.pathname.endsWith('/cgi-upload'),async route=>{
+                const response=await route.fetch();uploaded();await gate;
+                try{await route.fulfill({response});}catch{}
+            });
+            const pending=page.waitForResponse(r=>r.url().includes('ubus')&&(r.request().postData()||'').includes('"transfer_begin"'));
+            await choose({...backup,sources:[{...backup.sources[0],cachedYaml:backup.sources[0].cachedYaml.slice(0,1000)+'\n'}]});
+            const envelope=await (await pending).json(),upload=envelope.result[1].result;
+            assert.match(upload.id,/^[a-f0-9]{32}$/);
+            await reached;
+            const cleanup=page.waitForResponse(r=>r.url().includes('ubus')&&(r.request().postData()||'').includes('"transfer_release"'));
+            await page.getByRole('button',{name:'取消',exact:true}).click();await cleanup;
+            unblock();await page.unrouteAll({behavior:'wait'});faultInjection=false;
+            await assert.rejects(rpc('transfer_status',{id:upload.id}),/失效/);
+            assert.equal((await rpc('get')).data.revision,before);
+            assert.equal(await page.evaluate(()=>document.body.classList.contains('modal-overlay-active')),false);
+        });
+        await check('completed native upload survives a lost HTTP acknowledgement without sending the file again',async()=>{
+            faultInjection=true;
+            const beforeUploads=fileUploads,from=frames.length;
+            await page.route(url=>url.pathname.endsWith('/cgi-upload'),async route=>{
+                await route.fetch();lostFileAcknowledgements++;await route.abort('connectionreset');
+            });
+            await choose({...backup,sources:[{...backup.sources[0],cachedYaml:backup.sources[0].cachedYaml.slice(0,1000)+'\n'}]});
+            await page.getByRole('heading',{name:'确认导入',exact:true}).waitFor({timeout:60000});
+            assert.equal(fileUploads-beforeUploads,1);
+            assert.ok(frames.slice(from).some(r=>r.method==='transfer_status'));
+            assert.ok(!frames.slice(from).some(r=>r.method==='transfer_append'));
+            await page.getByRole('button',{name:'取消',exact:true}).click();
+            await page.unrouteAll({behavior:'wait'});faultInjection=false;
+        });
+        await check('native upload rejection falls back and completes 1.86 MiB preview under 4 KiB RPC caps and a lost chunk acknowledgement', async () => {
             faultInjection = true;
-            await page.route(url=>url.pathname.includes('ubus'), async route => {
+            await page.route(url=>url.pathname.includes('ubus')||url.pathname.endsWith('/cgi-upload'), async route => {
+                if(route.request().url().endsWith('/cgi-upload')) {
+                    rejectedFileUploads++;return route.fulfill({status:413,body:'Upload capped by test proxy'});
+                }
                 const body=route.request().postData()||'';
                 if (Buffer.byteLength(body)>4096) {
                     rejectedPosts++; return route.abort('connectionreset');
@@ -198,6 +255,7 @@ const path = require('node:path');
             await page.getByRole('heading',{name:'确认导入',exact:true}).waitFor({timeout:300000});
             assert.ok(rejectedPosts>0);
             assert.equal(lostAcknowledgements,1);
+            assert.equal(rejectedFileUploads,1);
             await page.getByRole('button',{name:'取消',exact:true}).click();
             await page.unrouteAll({behavior:'wait'});
             faultInjection = false;
@@ -208,7 +266,11 @@ const path = require('node:path');
             await page.getByRole('button',{name:'路由器设置',exact:true}).click();
             await page.getByRole('button',{name:'备份与迁移',exact:true}).click();
             faultInjection = true;
-            await page.route(url=>url.pathname.includes('ubus'),async route => {
+            await page.route(url=>url.pathname.includes('ubus')||url.pathname.endsWith('/cgi-download'),async route => {
+                // Exercise the RPC fallback even when native downloads are available.
+                if (new URL(route.request().url()).pathname.endsWith('/cgi-download')) {
+                    return route.fulfill({status:403,body:'Native download disabled by fallback test'});
+                }
                 const response=await route.fetch(), body=await response.body();
                 if(body.length>4096) {
                     rejectedReplies++;return route.abort('connectionreset');
@@ -240,7 +302,7 @@ const path = require('node:path');
             const current=(await rpc('get')).data;
             await rpc('save',{data:original,revision:current.revision});
         }
-        await fs.writeFile(path.join(output,'backup-ui-results.json'),JSON.stringify({results,confirmationMetrics,maxPostBytes:Math.max(...requests),rejectedPosts,rejectedReplies,lostAcknowledgements,errors},null,2));
+        await fs.writeFile(path.join(output,'backup-ui-results.json'),JSON.stringify({results,uploadMetrics,confirmationMetrics,maxPostBytes:Math.max(...requests),fileUploads,rejectedFileUploads,lostFileAcknowledgements,rejectedPosts,rejectedReplies,lostAcknowledgements,errors},null,2));
         await browser.close();
     }
 })().catch(e=>{console.error(e);process.exitCode=1});

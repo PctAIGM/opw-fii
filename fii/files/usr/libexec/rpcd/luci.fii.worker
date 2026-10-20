@@ -1,5 +1,5 @@
 #!/bin/sh
-# rpcd exec plugin; access is controlled by luci-app-fii.json.
+# Private execution backend. Only luci.fii is granted in the LuCI session ACL.
 case "$1" in
     list) exec /usr/bin/fii rpc-list ;;
     call) exec /usr/bin/fii rpc-call "$2" ;;

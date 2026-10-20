@@ -11,11 +11,11 @@ MAX_CONFIG = 8 * 1024 * 1024
 RUNNER = Path(__file__).resolve().parents[2] / 'libexec/fii/js-runner.cjs'
 
 
-def run(script, config=None, validate_only=False):
+def run(script, config=None, validate_only=False, scripts=None):
     check(isinstance(script, str) and len(script.encode('utf-8')) <= MAX_TEXT, 'JS 覆写超过 4 MiB')
     executable = shutil.which('node')
     check(executable is not None, 'JS 执行器未安装，请先执行 opkg update && opkg install node')
-    request = json.dumps({'script': script, 'config': config, 'validateOnly': validate_only},
+    request = json.dumps({'script': script, 'scripts': scripts, 'config': config, 'validateOnly': validate_only},
                          ensure_ascii=False, allow_nan=False)
     check(config is None or len(json.dumps(config, ensure_ascii=False).encode()) <= MAX_CONFIG, 'JS 输入配置超过 8 MiB')
     options = {}
@@ -23,12 +23,13 @@ def run(script, config=None, validate_only=False):
         options.update(user=65534, group=65534, extra_groups=[])
     # Do not inherit NODE_OPTIONS, proxy settings or credentials into the runner.
     environment = {key: os.environ[key] for key in ('PATH', 'SystemRoot', 'SYSTEMROOT') if key in os.environ}
+    timeout = 6 * (len(scripts) if scripts else 1)
     try:
         process = subprocess.run([executable, '--max-old-space-size=128', '--stack-size=512', str(RUNNER)],
                                  input=request, capture_output=True, text=True, encoding='utf-8',
-                                 errors='replace', timeout=6, env=environment, cwd=RUNNER.parent, **options)
+                                 errors='replace', timeout=timeout, env=environment, cwd=RUNNER.parent, **options)
     except subprocess.TimeoutExpired:
-        raise ValueError('JS 覆写执行超时（最多 6 秒），已终止脚本') from None
+        raise ValueError('JS 覆写执行超时（最多 %d 秒），已终止脚本' % timeout) from None
     except OSError:
         raise ValueError('无法启动 JS 执行器，请检查 node 安装') from None
     check(process.returncode == 0, 'JS 执行器异常退出，可能超过内存或调用栈限制')
@@ -50,3 +51,21 @@ def validate(script):
 
 def execute(script, config):
     return run(script, config)
+
+
+def execute_many(overrides, config):
+    """One disposable process, with a fresh VM and bounded result per script."""
+    if len(overrides) == 1:
+        return execute(overrides[0].get('body', ''), config)
+    scripts = [{'script': item.get('body', ''), 'name': item['name']} for item in overrides]
+    for item in scripts:
+        check(isinstance(item['script'], str) and len(item['script'].encode('utf-8')) <= MAX_TEXT, 'JS 覆写超过 4 MiB')
+    # Keep the runner's existing aggregate input bound even for large scripts.
+    if len(json.dumps(scripts, ensure_ascii=False).encode()) > MAX_TEXT:
+        for item in overrides:
+            try:
+                config = execute(item.get('body', ''), config)
+            except ValueError as exc:
+                raise ValueError('JS 覆写「%s」失败: %s' % (item['name'], exc)) from None
+        return config
+    return run('', config, scripts=scripts)
