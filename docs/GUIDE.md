@@ -163,6 +163,16 @@ FII 自身的备份导入同样保留当前路由器设置，适合迁移配置�
 
 ## 本地开发与构建
 
+### GitHub Actions 自动构建
+
+仓库的 `Build IPK` 工作流在 push、pull request 和手动触发时运行，使用 Ubuntu 24.04、Python 3.11 和 Node.js 22。先运行后端测试、JavaScript 语法和日志解析/过滤检查，再使用仓库自带的构建器生成并检查两个应用 IPK；不下载或打包 Mihomo 内核，也不需要 OpenWrt SDK。
+
+在 **Actions → Build IPK → 成功的运行 → Artifacts** 下载 `fii-ipk-运行编号-尝试次数`，解压后包含两个 IPK、`SHA256SUMS` 和 `manifest.json`。产物保留 30 天；运行摘要列出文件大小和 SHA-256。需要重新构建时，在工作流页面选择 **Run workflow**。构建不会自动创建 GitHub Release。
+
+包版本来自 `tools/build_ipk.py`，升级版本时同时更新两个包的 Makefile。工作流使用只读仓库权限，第三方 Action 固定到提交 SHA；PR 使用普通 `pull_request` 事件。
+
+### 本地构建与预览
+
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v

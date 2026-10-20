@@ -1,0 +1,87 @@
+name: Build IPK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and build application IPKs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run Python tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check JavaScript and log handling
+        run: |
+          node --check luci-app-fii/htdocs/luci-static/resources/view/fii/app.js
+          node --check fii/files/usr/libexec/fii/controller-req.cjs
+          node --check fii/files/usr/libexec/fii/js-runner.cjs
+          node tools/verify_log_parser.cjs
+          python tools/verify_log_filter.py --python-library fii/files/usr/lib
+
+      - name: Build application-only packages
+        run: python tools/build_ipk.py
+
+      - name: Verify packages and checksums
+        run: |
+          python tools/verify_packages.py
+          cd dist
+          sha256sum --check SHA256SUMS
+
+      - name: Upload IPKs and metadata
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fii-ipk-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            dist/*.ipk
+            dist/SHA256SUMS
+            dist/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write build summary
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          packages = json.loads(Path('dist/manifest.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('## Application-only IPKs\n\n')
+              summary.write('Download the artifact attached to this workflow run. Mihomo is installed from LuCI.\n\n')
+              summary.write('| Package | Bytes | SHA-256 |\n| --- | ---: | --- |\n')
+              for package in packages:
+                  summary.write(f"| `{package['file']}` | {package['bytes']} | `{package['sha256']}` |\n")
+          PY

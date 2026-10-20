@@ -15,6 +15,8 @@ OpenWrt 上的 Mihomo 配置管理工具，围绕 **订阅源 → 覆写 → 输
 
 ## 安装与使用
 
+推送代码或创建 PR 后，GitHub Actions 会自动构建；在 [Build IPK](https://github.com/PctAIGM/opw-fii/actions/workflows/build-ipk.yml) 的成功运行页面下载 Artifacts，也可手动触发。
+
 将构建得到的两个 IPK 上传至路由器 `/tmp/`，执行：
 
 ```sh
