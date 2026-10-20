@@ -51,6 +51,20 @@ class PartialSaveTests(unittest.TestCase):
         self.assertEqual(saved['settings']['userAgent'], 'fast-test')
         self.assertNotIn('cachedYaml', result['data']['sources'][0])
 
+    def test_direct_devices_partial_save_round_trip_and_invalid_change_is_atomic(self):
+        devices = ['AA:BB:CC:DD:EE:FF', '192.168.1.100', '2001:db8::/64']
+        result = self.save({'settings': {'lanBypassDevices': devices}})
+        self.assertEqual(result['data']['settings']['lanBypassDevices'], devices)
+        self.assertEqual(cli.dispatch('export')['data']['settings']['lanBypassDevices'], devices)
+        before = Store().read()
+        self.assertEqual(before['sources'], self.original['sources'])
+        self.assertEqual(before['settings']['lanRules'], self.original['settings']['lanRules'])
+        with self.assertRaisesRegex(ValueError, '直连设备'):
+            self.save({'settings': {'lanBypassDevices': ['invalid-address']}})
+        self.assertEqual(Store().read(), before)
+        self.save({'settings': {'lanBypassDevices': []}})
+        self.assertEqual(Store().read()['settings']['lanBypassDevices'], [])
+
     def test_partial_source_edit_preserves_cache_and_cannot_spoof_node_count(self):
         self.save({'kind': 'sources', 'id': 's1', 'fields': {'prefix': 'New-', 'nodeCount': 999}})
         saved = Store().read()['sources'][0]

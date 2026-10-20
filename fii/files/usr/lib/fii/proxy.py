@@ -12,6 +12,7 @@ OPTIONS = {"proxyEnabled": True, "tcpMode": "inherit", "udpMode": "inherit", "ip
            "dnsIpv4Hijack": True, "dnsFamilyIndependent": False, "fakeIpPing": False, "bypassChina4": False, "bypassChina6": False,
            "tcpPorts": "0-65535", "udpPorts": "0-65535", "bypassDscp": [], "bypassMarks": [],
            "reservedIpv4": RESERVED4, "reservedIpv6": RESERVED6, "lanRules": None, "routerRules": None,
+           "lanBypassDevices": [],
            "tunTimeout": 30, "tunInterval": 1}
 MAC = r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"
 
@@ -56,22 +57,39 @@ def mark(value):
 
 
 def rules(s, scope):
+    # Device bypass is terminal and precedes every ordinary LAN ACL, including
+    # legacy include/exclude lists. The same decision covers traffic, DNS,
+    # REDIRECT and Fake-IP Ping in proxy_nft.
+    devices = s.get("lanBypassDevices", []) if scope == "lan" else []
+    bypass = [{"enabled": True, "proxy": False, "dns": False,
+               "ips": [e for e in devices if not re.fullmatch(MAC, e)],
+               "macs": [e for e in devices if re.fullmatch(MAC, e)]}] if devices else []
     explicit = s.get(scope + "Rules")
     if explicit is not None:
-        return explicit
+        return bypass + explicit
     allow = {"enabled": True, "proxy": True, "dns": True}
     if scope == "router":
         users = s.get("routerBypassUsers", [])
         return ([{**allow, "users": users, "proxy": False, "dns": False}] if users else []) + [allow]
     entries, mode = s.get("lanAccess", []), s.get("lanAccessMode", "all")
     if mode == "all":
-        return [allow]
+        return bypass + [allow]
     rule = {**allow, "ips": [e for e in entries if not re.fullmatch(MAC, e)],
             "macs": [e for e in entries if re.fullmatch(MAC, e)], "proxy": mode == "include", "dns": mode == "include"}
-    return ([rule] if entries else []) + ([allow] if mode == "exclude" else [])
+    return bypass + ([rule] if entries else []) + ([allow] if mode == "exclude" else [])
 
 
 def validate(s):
+    devices = s["lanBypassDevices"]
+    check(isinstance(devices, list) and len(devices) <= 256, "直连设备列表无效或超过 256 项")
+    for device in devices:
+        check(isinstance(device, str), "直连设备地址必须是文本")
+        check("%" not in device, "直连设备地址不支持 IPv6 区域标识: " + device)
+        if not re.fullmatch(MAC, device):
+            try:
+                ipaddress.ip_network(device, strict=False)
+            except ValueError:
+                raise ValueError("直连设备地址无效: " + device) from None
     for key in ("proxyEnabled", "ipv4Proxy", "dnsIpv4Hijack", "dnsFamilyIndependent", "fakeIpPing", "bypassChina4", "bypassChina6"):
         check(type(s[key]) is bool, key + "必须是布尔值")
     check(s["tcpMode"] in ("inherit", "off", "redirect", "tproxy", "tun"), "TCP 模式无效")

@@ -1364,6 +1364,10 @@ return view.extend({
         }), s.interfaces);
         var lanAcl = accessEditor('lan', legacyAccess(s, 'lan'), network);
         var routerAcl = accessEditor('router', legacyAccess(s, 'router'), network);
+        var directDevices = entries('直连设备（MAC / IP / 网段）', s.lanBypassDevices || [], 'AA:BB:CC:DD:EE:FF 或 192.168.1.100',
+            (network.hosts || []).filter(function(h) { return h.mac; }).map(function(h) {
+                return [h.mac, (h.name || h.ip) + ' · ' + h.ip + ' · ' + h.mac];
+            }));
         var dns = toggle('接管局域网 DNS', s.dnsHijack, '将设备的常规 DNS 查询交给 Mihomo。');
         var routerDns = toggle('接管路由器本机 DNS', s.routerDnsHijack !== false);
         var dns6 = toggle('接管 IPv6 DNS', s.dnsIpv6Hijack && (s.dnsFamilyIndependent || s.ipv6));
@@ -1390,6 +1394,11 @@ return view.extend({
         var routerOptions = E('div', {}, [E('h4', {}, '访问控制'), routerAcl.node]);
         var scopeInfo = E('p', { 'class': 'fii-muted', role: 'status' });
         var lanPanel = card('局域网代理', [lan.node, lanOptions]);
+        var directDnsNotice = E('p', { 'class': 'fii-notice' }, '已开启路由器本机代理和 DNS 接管。若直连设备使用路由器 DNS，请在本机访问规则中让 DNS 进程直连并关闭其 DNS 接管，确保上游返回真实 IP。');
+        var accessPanel = card('访问控制', [E('p', {}, '指定设备跳过 FII 透明代理，全部直连。名单优先于局域网访问规则，同时跳过 TCP / UDP 代理、DNS 劫持和 Fake-IP Ping 接管。'),
+            directDevices.node,
+            E('p', { 'class': 'fii-muted' }, '推荐从设备列表选择 MAC 地址，可同时匹配该设备的 IPv4 / IPv6 流量。也可手动填写 IP 或网段；IP 条目只匹配对应地址。仅对所选局域网接口生效。'),
+            E('p', { 'class': 'fii-muted' }, '直连设备应使用能返回真实 IP 的 DNS。若设备缓存了 Fake-IP，应用后请重连网络或清理 DNS 缓存；若自行将 DNS 指向 Mihomo，请改用正常 DNS。'), directDnsNotice]);
         var routerPanel = card('路由器本机代理', [router.node, routerOptions]);
         var panels = [card('代理设置', [master.node, E('div', { 'class': 'fii-settings-grid' }, [mode.node, udpMode.node, ipv4.node, ipv6.node, dns4.node, dns6.node]), ping.node, scopeInfo])];
         var dnsPanel = E('div', {}, [card('DNS 接管', [E('p', { 'class': 'fii-muted' }, '这里只决定哪些设备的 DNS 请求交给 Mihomo。解析服务器、DNS 模式、过滤与域名策略在覆写中配置。'), dns.node, routerDns.node,
@@ -1404,7 +1413,7 @@ return view.extend({
         var backups = card('备份与迁移', [E('p', {}, '导入 FII 或 SubConverter Flutter 备份，迁移订阅、覆写和输出，保留当前路由器设置。'), actions([
             button('导出备份', async function() { var r = await call('export'); download('fii-backup.json', JSON.stringify(r.data, null, 2)); }),
             button('导入备份', function() { self.importBackup(); })])]);
-        var allPanels = { proxy: proxyPanel, lan: lanPanel, router: routerPanel, bypass: bypassPanel, misc: miscPanel, dns: dnsPanel, service: servicePanel, backup: backups };
+        var allPanels = { proxy: proxyPanel, lan: lanPanel, access: accessPanel, router: routerPanel, bypass: bypassPanel, misc: miscPanel, dns: dnsPanel, service: servicePanel, backup: backups };
         var tabs = E('nav', { 'class': 'fii-settings-tabs', 'aria-label': '路由器设置分类' });
         var currentSection = self.settingsSection || 'proxy';
         function showSection(key) {
@@ -1416,7 +1425,7 @@ return view.extend({
                 tab.setAttribute('aria-pressed', String(tab.dataset.section === key));
             });
         }
-        [['proxy', '代理设置'], ['lan', '局域网代理'], ['router', '本机代理'], ['bypass', '绕过设置'], ['misc', '其他设置'], ['dns', 'DNS 接管'], ['service', '运行设置'], ['backup', '备份与迁移']].forEach(function(pair) {
+        [['proxy', '代理设置'], ['lan', '局域网代理'], ['access', '访问控制'], ['router', '本机代理'], ['bypass', '绕过设置'], ['misc', '其他设置'], ['dns', 'DNS 接管'], ['service', '运行设置'], ['backup', '备份与迁移']].forEach(function(pair) {
             tabs.appendChild(button(pair[1], function() { showSection(pair[0]); }, false, { 'class': 'fii-settings-tab', 'data-section': pair[0] }));
         });
         function updateVisibility() {
@@ -1425,6 +1434,7 @@ return view.extend({
             lanOptions.hidden = !lan.read(); routerOptions.hidden = !router.read();
             dns.control.disabled = !transparent || !lan.read();
             routerDns.control.disabled = !transparent || !router.read();
+            directDnsNotice.hidden = !transparent || !router.read() || !routerDns.read();
             [ipv4, ipv6, dns4, dns6, ping].forEach(function(f) { f.control.disabled = !transparent; });
             scopeInfo.textContent = !transparent ? '仅提供代理和 DNS 监听服务。' : [lan.read() ? '局域网设备' : '', router.read() ? '路由器本机' : ''].filter(Boolean).join('、') + (lan.read() || router.read() ? '的流量交由 Mihomo 规则处理。' : '请选择需要代理的流量范围。');
         }
@@ -1447,7 +1457,7 @@ return view.extend({
                     tunTimeout: tunTimeout.read(), tunInterval: tunInterval.read(),
                     interfaces: interfaces.read(), ipv6: ipv6.read(), dnsHijack: dns.read(),
                     lanProxy: lan.read(), routerProxy: router.read(), udpProxy: udpMode.read() !== 'off', routerDnsHijack: routerDns.read(), dnsIpv6Hijack: dns6.read(),
-                    lanRules: lanAcl.read(), routerRules: routerAcl.read(),
+                    lanRules: lanAcl.read(), routerRules: routerAcl.read(), lanBypassDevices: directDevices.read(),
                     autostart: boot.read(), autoApply: auto.read(), bypass: bypass.read(), userAgent: agent.read() });
                 var changedSettings = {};
                 Object.keys(settings).forEach(function(key) {
@@ -1472,7 +1482,7 @@ return view.extend({
         saveActions.hidden = currentSection === 'backup';
         var form = E('form', { 'class': 'fii-settings', submit: function(event) { event.preventDefault(); } }, [E('p', { 'class': 'fii-muted' }, '本页只管理路由器接口、流量接管、防火墙与服务。Mihomo 的 DNS、规则、代理组和通用参数在覆写中配置。'), tabs,
             network.error ? E('p', { 'class': 'fii-notice', role: 'alert' }, '读取网络接口失败：' + network.error + '。可重新载入后重试。') : '',
-            proxyPanel, lanPanel, routerPanel, bypassPanel, miscPanel, dnsPanel, servicePanel, backups, saveActions,
+            proxyPanel, lanPanel, accessPanel, routerPanel, bypassPanel, miscPanel, dnsPanel, servicePanel, backups, saveActions,
             !canApply ? E('p', { 'class': 'fii-muted' }, '首次使用请先在输出页生成一份运行配置。') : '']);
         return form;
     },

@@ -5,10 +5,66 @@ from unittest.mock import patch
 from test_fii import sample, TestDirectory
 from fii.store import rooted
 from fii import model, runtime
-from fii.proxy import ports, mark, modes
+from fii.proxy import ports, mark, modes, rules
 
 
 class ProxyOptionsTests(unittest.TestCase):
+    def test_direct_devices_precede_explicit_and_legacy_lan_rules_only(self):
+        s = model.defaults()["settings"]
+        devices = ["192.168.1.100", "2001:db8::/64", "AA:BB:CC:DD:EE:FF"]
+        s["lanBypassDevices"] = devices
+        for ordinary in (None, [], [{"enabled": True, "proxy": True, "dns": True}]):
+            for mode in ("all", "include", "exclude"):
+                with self.subTest(ordinary=ordinary, mode=mode):
+                    s.update(lanRules=ordinary, lanAccessMode=mode, lanAccess=["192.168.1.100"])
+                    result = rules(s, "lan")
+                    self.assertFalse(result[0]["proxy"])
+                    self.assertFalse(result[0]["dns"])
+                    self.assertEqual(result[0]["ips"], devices[:2])
+                    self.assertEqual(result[0]["macs"], devices[2:])
+                    self.assertNotIn(result[0], rules(s, "router"))
+                    if ordinary is not None:
+                        self.assertEqual(s["lanRules"], ordinary)
+        s["lanBypassDevices"] = []
+        s["lanRules"] = [{"enabled": True, "proxy": True, "dns": True}]
+        self.assertEqual(rules(s, "lan"), s["lanRules"])
+
+    def test_direct_devices_return_before_every_proxy_and_dns_action(self):
+        s = model.defaults()["settings"]
+        s.update(ipv6=True, routerProxy=True, fakeIpPing=True,
+                 lanBypassDevices=["192.168.1.100", "2001:db8:1::5/64", "AA:BB:CC:DD:EE:FF"],
+                 lanRules=[{"enabled": True, "proxy": True, "dns": True}])
+        for tcp, udp in (("tproxy", "tproxy"), ("redirect", "tun"), ("tun", "off")):
+            s.update(tcpMode=tcp, udpMode=udp)
+            model.validate({**model.defaults(), "settings": s})
+            nft = runtime.nftables(s)
+            for action in ("traffic", "dns", "ping", "redirect"):
+                with self.subTest(tcp=tcp, udp=udp, action=action):
+                    chain = nft.split("chain lan_acl_" + action + " {", 1)[1].split("\n  }", 1)[0]
+                    verdict = "return" if action == "redirect" else "goto lan_rule_0_" + action
+                    for expr in ("ip saddr 192.168.1.100/32", "ip6 saddr 2001:db8:1::/64", "ether saddr aa:bb:cc:dd:ee:ff"):
+                        self.assertIn(expr + " " + verdict, chain)
+                    default = "goto lan_redirect" if action == "redirect" else "goto lan_rule_1_" + action
+                    self.assertLess(chain.index(verdict), chain.index(default))
+                    if action != "redirect":
+                        self.assertIn("chain lan_rule_0_" + action + " {\n    return;\n  }", nft)
+            router = nft.split("chain router_acl_traffic {", 1)[1].split("\n  }", 1)[0]
+            self.assertNotIn("saddr", router)
+        s["proxyEnabled"] = False
+        self.assertEqual(runtime.nftables(s), "")
+
+    def test_direct_devices_validate_input_and_upgrade_old_settings(self):
+        data = model.defaults()
+        del data["settings"]["lanBypassDevices"]
+        model.validate(data)
+        self.assertEqual(data["settings"]["lanBypassDevices"], [])
+        for invalid in (None, "192.168.1.2", ["192.168.1.2"] * 257, [123], [""],
+                        ["invalid"], ["192.168.1.2; flush ruleset"], ["aa:bb:cc:dd:ee:gg"], ["::/129"],
+                        ["fe80::1%eth0"], ["fe80::1%eth0;flush ruleset"]):
+            data["settings"]["lanBypassDevices"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "直连设备"):
+                model.validate(data)
+
     def test_unavailable_tun_and_missing_cgroup_fail_before_activation(self):
         with TestDirectory() as tmp, patch.dict(os.environ, {"FII_ROOT": tmp}):
             s = model.defaults()["settings"]

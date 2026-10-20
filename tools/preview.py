@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fii/files/usr/lib"))
@@ -24,6 +25,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def do_GET(self):
+        # The LuCI view uses a content hash query to refresh its stylesheet.
+        self.path = urlsplit(self.path).path
         if self.headers.get("Host") not in ("127.0.0.1:8765", "localhost:8765"):
             self.send_error(403)
             return

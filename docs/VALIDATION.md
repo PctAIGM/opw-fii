@@ -2,6 +2,18 @@
 
 Target requested by the user: **OpenWrt 24.10.8 / Intel J4125 / x86_64**.
 
+## Direct device access control: 0.1.1-40 (2026-10-20)
+
+Router settings now provide a dedicated access-control section for devices that bypass FII. `lanBypassDevices` accepts MAC, IPv4, IPv6 and CIDR entries. A terminal LAN decision is inserted before explicit and legacy access rules, covering TPROXY, REDIRECT, TUN, DNS interception and Fake-IP Ping. An empty list retains existing behavior; router-process rules remain separate. The setting uses existing partial-save, export and activation snapshot paths. Existing subscription/override/output semantics are preserved.
+
+Validation passed:
+
+- **207 Python tests**, including priority over explicit/legacy rules, IPv4/IPv6/MAC matches, terminal decisions for all four firewall actions across three TCP/UDP mode combinations, disabled interception, old-setting defaults, input rejection, partial-save/export persistence and atomic invalid-save rejection.
+- `tools/verify_access_ui.cjs` uses an isolated local Python backend with DHCP/network fixtures and real Chrome. Five browser checks cover DHCP MAC selection plus an unsubmitted IPv6 draft, switching settings sections, save/reload/export, invalid-input revision preservation, removing all entries, and a 390px viewport without page overflow. No JavaScript page errors occurred. Desktop/mobile screenshots and the result are under `build/access-control/`. This is the local LuCI view harness, not installed-router validation.
+- JavaScript syntax, diff whitespace checks and both application-only IPK metadata/content checks passed. Packages contain no Mihomo binary and retain the existing managed Release/Alpha core workflow.
+
+Device DNS must resolve real IPs. Previously cached Fake-IP answers need to expire or be cleared. If clients use dnsmasq and router-process DNS is also intercepted, its upstream queries have the router's identity; the device list cannot distinguish the original clients. The UI displays a notice when router proxy and router DNS interception are enabled, and the guide explains bypassing the DNS process in router access rules. No physical-router package installation, live forwarding test or device DNS check was performed for this change.
+
 ## Running core log read fix: 0.1.1-39 (2026-10-20)
 
 On the physical router, the installed `luci.fii logs` RPC returned zero records while Mihomo was running and the system ring buffer contained hundreds of `core-run[PID]` records. Two assumptions in the old filter were wrong: ubox `logread -e` compiles a basic regular expression (`REG_NOSUB`, without `REG_EXTENDED`), and applies it to the raw tag-prefixed message before formatting its timestamp/facility. The old extended-expression syntax and leading space therefore matched nothing. The filter also omitted the `core-run` tag used by procd for the wrapper's inherited stdout/stderr. Earlier mock query assertions and stopped-core browser validation did not expose these faults.
