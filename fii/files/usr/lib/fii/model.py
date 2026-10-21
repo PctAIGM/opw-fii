@@ -10,6 +10,7 @@ MAX_DOCUMENT = 16 * 1024 * 1024
 
 def defaults():
     from .proxy import OPTIONS
+    from .urltest import DEFAULT_SITES
     return {
         "format": "fii-backup", "version": 1, "revision": 0,
         "sources": [], "overrides": [], "outputs": [],
@@ -19,7 +20,7 @@ def defaults():
             "interfaces": ["br-lan"], "ipv6": False, "dnsHijack": True,
             "mixedPort": 7890, "redirPort": 7893, "tproxyPort": 7895,
             "dnsPort": 1053, "controllerPort": 9090,
-            "controllerAddress": "127.0.0.1",
+            "controllerAddress": "127.0.0.1", "mixedAddress": "127.0.0.1",
             "secret": secrets.token_urlsafe(24), "userAgent": "clash.meta",
             "bypass": [],
             "lanProxy": True, "routerProxy": False, "udpProxy": True,
@@ -28,6 +29,7 @@ def defaults():
             "bootDelay": 0, "scheduledRestart": False, "restartTime": "03:00",
             "goMaxProcs": 0, "goMemLimit": 0, "disableQuicGso": False,
             "disableQuicEcn": False, "skipCoreIpv6Check": False,
+            "urlTestSites": copy.deepcopy(DEFAULT_SITES),
         },
     }
 
@@ -163,6 +165,10 @@ def validate(data):
         if key not in settings:
             settings[key] = setting_defaults[key]
     settings.setdefault("controllerAddress", setting_defaults["controllerAddress"])
+    settings.setdefault("mixedAddress", setting_defaults["mixedAddress"])
+    settings.setdefault("urlTestSites", setting_defaults["urlTestSites"])
+    from .urltest import validate_sites
+    validate_sites(settings['urlTestSites'])
     for key in ("autostart", "autoApply", "ipv6", "dnsHijack", "lanProxy", "routerProxy", "udpProxy",
                 "routerDnsHijack", "dnsIpv6Hijack", "scheduledRestart", "disableQuicGso",
                 "disableQuicEcn", "skipCoreIpv6Check"):
@@ -183,6 +189,11 @@ def validate(data):
         ipaddress.ip_address(settings["controllerAddress"])
     except ValueError:
         raise ValueError("控制器监听地址必须是 IP 地址") from None
+    check(isinstance(settings["mixedAddress"], str), "混合代理监听地址必须是 IP 地址")
+    try:
+        ipaddress.ip_address(settings["mixedAddress"])
+    except ValueError:
+        raise ValueError("混合代理监听地址必须是 IP 地址") from None
     interfaces = settings.get("interfaces")
     check(isinstance(interfaces, list) and 0 <= len(interfaces) <= 16 and
           all(isinstance(i, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", i) for i in interfaces),

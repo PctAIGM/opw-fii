@@ -2,6 +2,16 @@
 
 Target requested by the user: **OpenWrt 24.10.8 / Intel J4125 / x86_64**.
 
+## Mixed listener binding and custom inbound preservation: 0.1.1-44 (2026-10-21)
+
+The runtime overlay no longer discards custom `listeners`. Protocol, authentication, routing and other listener fields remain intact, and adding the managed default does not produce a misleading listener-loss warning. A custom entry explicitly named `fii-mixed` takes precedence over the generated default without duplication. `mixedAddress` is a validated IPv4/IPv6 setting exposed on the Mihomo page; legacy stores retain the loopback default without a write on read.
+
+All **234 Python tests passed**, including six listener regressions covering default migration without writes, IP validation, `+listeners` rendering, credentials/routing preservation, same-name precedence and idempotence, invalid shapes, and setting save/export. Two existing maintenance environment tests were corrected to use an isolated FII_ROOT rather than write to the drive's `/tmp` equivalent. JavaScript syntax, whitespace and both application-only **0.1.1-44** package inspections passed. The actual router's Alpha core validated the candidate configuration before installation/application.
+
+Both packages were installed with opkg on the physical router, verifying **34 payload files**, preserving revision **68**, existing active/runtime configuration, DHCP, installed core binary and enabled boot preference during package upgrade. Backup: `/etc/fii/backups/package-upgrade-0.1.1-44-20261021-131740`. Applying only `mixedAddress=192.168.100.1` then produced revision **69**, with all other runtime fields unchanged and the custom `inss` Shadowsocks listener restored with its complete configured fields. Settings/active backup: `/etc/fii/backups/listener-binding-20261021-131829`.
+
+Real socket inspection showed mixed TCP/UDP at **192.168.100.1:7890** and Shadowsocks TCP/UDP at **:::24313** (configured as 0.0.0.0). TCP connections to both ports succeeded from the development PC. HTTPS requests through the explicit LAN HTTP proxy **192.168.100.1:7890** returned Baidu **200** and Google generate_204 **204**. The latter verifies the mixed HTTP CONNECT path; encrypted Shadowsocks client traffic and SOCKS/UDP relay traffic were not exercised. The installed LuCI page displayed the new binding setting as **192.168.100.1**; screenshot: `build/performance/router-listener-address.png`. Existing browser tabs were not modified.
+
 ## Maintenance features (restart schedule, boot delay, core env, br_netfilter): 0.1.1-43 (2026-10-21)
 
 Four Nikki-parity maintenance features were added and verified on the iStoreOS 24.10.8 QEMU VM: **daily scheduled restart** checked by the per-minute scheduler (fires only while the service is running; a marker under `/etc/fii/scheduler.json` suppresses duplicate fires within 12 hours), **boot start delay** implemented as a backgrounded `boot()` sleep that reads `fii boot-delay` (manual start unaffected), **Go runtime environment variables** (`GOMAXPROCS`/`GOMEMLIMIT`/`QUIC_GO_DISABLE_GSO`/`QUIC_GO_DISABLE_ECN`/`SKIP_SYSTEM_IPV6_CHECK`) written to `/tmp/fii/core-env` by `prepare()` and sourced by `core-run`, and **br_netfilter compatibility** (TPROXY up flips `bridge-nf-call-iptables`/`ip6tables` from 1 to 0 with flag files under `/tmp/fii/`; firewall-down restores exactly the flipped sysctls).
@@ -528,3 +538,14 @@ After installing on a reachable test router:
 13. Enable autostart, save and apply; reboot and verify the selected output returns. Inspect Python / Mihomo memory, overlay space and sustained traffic performance on the J4125.
 
 The router acceptance result should be added only after actually performing these checks.
+
+
+## 2026-10-21：概览网址延迟测试（0.1.1-45）
+
+- 概览加入百度、Google/gstatic generate_204、GitHub 响应卡片，支持点击重测、全部测试及网站名称/URL 的添加、编辑、删除。最多 24 个，列表存入 settings.urlTestSites，旧配置按需补齐默认项；空列表不重建默认项。
+- 测试由路由器 Python 独立进程发起 HTTP GET，验证 HTTPS 证书，忽略环境代理变量，使用当前路由/本机透明代理策略。收到首个响应头即结束，不跟随跳转、不读取正文；HTTP 4xx/5xx 保留耗时和状态码，连接/DNS/TLS 错误单独显示。子进程整体 8 秒上限，跨浏览器最多 3 个探测。结果仅保存在页面内存与 /tmp 任务文件中。
+- 设置修改仅保存列表，无需应用或重启核心。RPC 已同步 Python、ucode、LuCI 和 ACL 白名单，并走后台任务；旧版元数据缓存缺少测试网站时回落验证器，避免升级后显示空列表。
+- Python 全量 **242 项通过**，其中新增 8 项覆盖旧状态/缓存迁移、空列表、URL 校验、真实本地 HTTP 服务状态码与只读响应头、重定向、环境代理隔离、子进程测试、保存与过期 URL、总超时、全局并发、错误脱敏和 RPC 权限。真实 OpenWrt ucode VM **18 项通过**，补充旧缓存默认项的回落断言。
+- Chrome 中验证新增、修改、删除、修改 URL 后清除旧耗时、测试中切换页面及返回后显示结果。实际 iStoreOS Argon 主题验证并修正标题操作区被 h3 宽度挤成两行的问题。手机断点和深色样式已实现，本轮未做实体手机交互验证。
+- 两个应用 IPK 已构建并通过包结构、权限、依赖、JS/CSS 内容哈希检查；实际路由器已安装 **0.1.1-45**，35 个文件内容与权限核验成功。升级前后 state.json、active.json、运行 YAML、内核及 DHCP 文件哈希一致，保存/运行版本均为 69，内核和管理 API 正常。最终升级备份：/etc/fii/backups/package-upgrade-0.1.1-45-20261021-143705。
+- 实际 LuCI 点击“全部测试”返回百度 HTTP 200 / 97 ms，Google HTTP 204 / 139 ms，GitHub HTTP 200 / 219 ms（14:38:56 的单次样本，耗时会随网络变化）。

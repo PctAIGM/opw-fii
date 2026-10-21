@@ -19,7 +19,7 @@ const digitsPattern = /^[0-9]+$/;
 const spacePattern = /\s+/;
 const cgroupPattern = /^[A-Za-z0-9_:@.-]{1,64}$/;
 const methods = ['get', 'status', 'save', 'refresh', 'preview', 'apply', 'service', 'export', 'import',
-    'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'resource_update', 'core_info', 'core_check', 'core_update',
+    'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'url_test', 'resource_update', 'core_info', 'core_check', 'core_update',
     'core_channel', 'network', 'transfer_begin', 'transfer_append', 'transfer_invoke', 'transfer_read',
     'transfer_release', 'transfer_status'];
 let documents = {}, coreCache = null, groupOrderCache = null, nextWait = 0, waits = {};
@@ -133,7 +133,8 @@ function summary() {
     let data = view.data;
     check(type(data) == 'object' && data.format == 'fii-backup' && data.version == 1 &&
         type(data.revision) == 'int' && type(data.sources) == 'array' && type(data.overrides) == 'array' &&
-        type(data.outputs) == 'array' && type(data.settings) == 'object', fallback);
+        type(data.outputs) == 'array' && type(data.settings) == 'object' &&
+        type(data.settings.urlTestSites) == 'array', fallback);
     return data;
 }
 function get(payload) {

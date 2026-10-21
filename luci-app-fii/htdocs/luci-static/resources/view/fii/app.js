@@ -7,7 +7,7 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Content version is synchronized by tools/build_ipk.py, including same-version rebuilds.
-var fiiStyleHash = '4ed112caa7230da9';
+var fiiStyleHash = 'b98db232ddff02a0';
 var fiiStylePromise = null;
 function loadStyle() {
     var href = L.resource('fii/style.css') + '?v=' + fiiStyleHash;
@@ -47,7 +47,7 @@ function reduceChunk(size, onProgress, download) {
     return true;
 }
 ['get', 'status', 'save', 'refresh', 'preview', 'apply', 'service', 'export', 'import',
- 'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'resource_update', 'core_info', 'core_check', 'core_update', 'core_channel', 'network',
+ 'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'url_test', 'resource_update', 'core_info', 'core_check', 'core_update', 'core_channel', 'network',
  'transfer_begin', 'transfer_append', 'transfer_invoke', 'transfer_read', 'transfer_release', 'transfer_status'].forEach(function(name) {
     methods[name] = rpc.declare({ object: 'luci.fii', method: name, params: ['payload'], expect: { '': {} }, nobatch: true });
 });
@@ -194,7 +194,16 @@ async function checkBackup(file, revision, onProgress, control) {
 }
 
 function notify(message, error) {
+    // LuCI notifications stay until dismissed; replace FII's previous notice
+    // and expire success messages so repeated actions don't stack up.
+    document.querySelectorAll('.alert-message[data-fii]').forEach(function(el) { el.remove(); });
     ui.addNotification(null, E('p', {}, message), error ? 'error' : 'info');
+    var fresh = document.querySelector('.alert-message:not([data-fii])');
+    if (!fresh)
+        return;
+    fresh.setAttribute('data-fii', '1');
+    if (!error)
+        window.setTimeout(function() { if (fresh.isConnected) fresh.remove(); }, 6000);
 }
 
 function button(label, action, primary, attrs) {
@@ -565,6 +574,8 @@ return view.extend({
         if (this.disposeProxyGroups) this.disposeProxyGroups();
         if (this.disposeLogs) this.disposeLogs();
         if (this.disposeResources) this.disposeResources();
+        if (this.disposeUrlTests) this.disposeUrlTests();
+        this.disposeUrlTests = null;
         this.disposeResources = null;
         this.refreshResources = null;
         this.disposeLogs = null;
@@ -633,10 +644,92 @@ return view.extend({
         this.liveStatus = E('div');
         return E('div', {}, [E('div', { 'class': 'fii-stats' }, [['订阅源', this.data.sources.length], ['覆写', this.data.overrides.length], ['输出配置', this.data.outputs.length]].map(function(v) {
             return E('div', { 'class': 'fii-stat' }, [E('span', {}, v[0]), E('strong', {}, String(v[1]))]);
-        })), this.liveStatus,
+        })), this.urlTestsPanel(), this.liveStatus,
         E('section', { 'class': 'fii-card' }, [E('h3', {}, 'Mihomo'), E('p', { 'class': 'fii-muted' }, '内核版本：' + (this.status.coreVersion || '尚未安装')),
             actions([button('内核与端口管理', function() { self.tab = 'mihomo'; history.replaceState(null, '', '#mihomo'); self.draw(); })])])
         ]);
+    },
+
+    urlTestsPanel: function() {
+        var self = this, disposed = false;
+        var state = self.urlTestState || (self.urlTestState = { results: Object.create(null), pending: Object.create(null), active: 0 });
+        var sites = self.data.settings.urlTestSites || [], revision = self.data.revision;
+        var host = E('div', { 'class': 'fii-url-grid' });
+        var all = button('全部测试', async function() {
+            // Each worker waits for its result before taking the next site.
+            var queue = sites.slice();
+            await Promise.all([0, 1, 2].map(async function() {
+                while (queue.length && !disposed) await test(queue.shift());
+            }));
+        });
+        var add = button('添加网站', function() { edit(); });
+        var panel = E('section', { 'class': 'fii-card fii-url-panel', 'aria-label': '网址延迟测试' }, [
+            E('div', { 'class': 'fii-card-heading' }, [E('h3', {}, '网址延迟测试'), actions([all, add])]),
+            E('p', { 'class': 'fii-muted' }, '由路由器发起 HTTP 请求，按当前路由与代理策略访问。耗时包含 DNS、连接和 TLS，收到首个响应头即结束，不跟随跳转；单次最多 8 秒。'), host
+        ]);
+        function key(site) { return site.id + '\n' + site.url; }
+        function render() {
+            if (disposed) return;
+            all.disabled = !sites.length || state.active > 0;
+            host.replaceChildren.apply(host, sites.map(function(site) {
+                var result = state.results[key(site)], pending = state.pending[key(site)];
+                var tone = !result ? '' : !result.reachable || result.status >= 400 ? 'error' : result.delay < 500 ? 'fast' : 'slow';
+                var label = pending ? '检测中…' : !result ? '点击检测' : result.reachable ? result.delay + ' ms' : result.error;
+                var meta = result ? (result.reachable ? 'HTTP ' + result.status + ' · ' : '') + new Date(result.testedAt * 1000).toLocaleTimeString() : '尚未测试';
+                var brand = ['baidu', 'google', 'github'].indexOf(site.id) >= 0 ? site.id : 'custom';
+                return E('article', { 'class': 'fii-url-site' }, [
+                    E('span', { 'class': 'fii-url-icon ' + brand, 'aria-hidden': 'true' }, brand === 'baidu' ? 'du' : brand === 'github' ? 'GH' : site.name.slice(0, 1).toUpperCase()),
+                    E('div', { 'class': 'fii-url-info' }, [E('strong', {}, site.name), E('span', { 'class': 'fii-url-address', title: site.url }, site.url),
+                        button(label, function() { return test(site); }, false, { 'class': 'fii-url-result ' + tone,
+                            disabled: pending || state.active >= 3, 'aria-label': '测试 ' + site.name, 'aria-busy': String(!!pending) }),
+                        E('small', { 'class': 'fii-muted', role: 'status', 'aria-live': 'polite' }, meta)]),
+                    E('div', { 'class': 'fii-url-tools' }, [button('编辑', function() { edit(site); }, false, { 'aria-label': '编辑 ' + site.name }),
+                        button('删除', function() { return persist(sites.filter(function(item) { return item.id !== site.id; })); }, false, { 'aria-label': '删除 ' + site.name })])
+                ]);
+            }));
+            if (!sites.length) host.appendChild(E('p', { 'class': 'fii-muted' }, '还没有测试网站，点击“添加网站”开始。'));
+        }
+        async function test(site) {
+            var token = key(site);
+            if (disposed || state.pending[token] || state.active >= 3) return;
+            state.pending[token] = true; state.active++; render();
+            try {
+                var result = await call('url_test', { id: site.id, url: site.url });
+                if (result.id === site.id && result.url === site.url) state.results[token] = result;
+            } catch (err) {
+                state.results[token] = { reachable: false, error: err.message, testedAt: Date.now() / 1000 };
+            } finally {
+                delete state.pending[token]; state.active--;
+                if (self.refreshUrlTests) self.refreshUrlTests();
+            }
+        }
+        async function persist(next) {
+            var reply = await call('save', { patch: { settings: { urlTestSites: next } }, compact: true, revision: revision });
+            var retained = Object.create(null);
+            next.forEach(function(site) { if (state.results[key(site)]) retained[key(site)] = state.results[key(site)]; });
+            state.results = retained;
+            self.data = reply.data; self.draw(); notify(reply.message);
+        }
+        function edit(original) {
+            var name = field('网站名称', original ? original.name : '', { required: true });
+            var url = field('测试网址', original ? original.url : 'https://', { required: true, type: 'url', help: '支持 HTTP(S)，建议使用体积较小的页面或 generate_204 地址。' });
+            var feedback = E('p', { 'class': 'fii-error', role: 'alert' });
+            var save = button('保存', async function() {
+                if (!name.control.reportValidity() || !url.control.reportValidity()) return;
+                var item = { id: original ? original.id : 'site-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), name: name.read().trim(), url: url.read().trim() };
+                try {
+                    await persist(original ? sites.map(function(site) { return site.id === original.id ? item : site; }) : sites.concat([item]));
+                    ui.hideModal();
+                } catch (err) { feedback.textContent = err.message; }
+            }, true);
+            ui.showModal(original ? '编辑测试网站' : '添加测试网站', [name.node, url.node, feedback,
+                actions([button('取消', function() { ui.hideModal(); }), save])], 'fii-modal');
+            name.control.focus();
+        }
+        self.refreshUrlTests = render;
+        self.disposeUrlTests = function() { disposed = true; self.refreshUrlTests = null; };
+        render();
+        return panel;
     },
 
     proxiesPage: function() {
@@ -1022,10 +1115,12 @@ return view.extend({
     mihomoPage: function() {
         var self = this, s = this.data.settings;
         var ports = {};
-        [['mixedPort', '本机混合代理端口'], ['redirPort', 'REDIRECT 端口'], ['tproxyPort', 'TPROXY 端口'], ['dnsPort', 'DNS 端口'], ['controllerPort', '控制器端口']].forEach(function(pair) {
+        [['mixedPort', '混合代理端口'], ['redirPort', 'REDIRECT 端口'], ['tproxyPort', 'TPROXY 端口'], ['dnsPort', 'DNS 端口'], ['controllerPort', '控制器端口']].forEach(function(pair) {
             ports[pair[0]] = field(pair[1], s[pair[0]], { type: 'number', min: 1024, max: 65535, required: true });
         });
         var currentAddress = s.controllerAddress || '127.0.0.1';
+        var mixedAddress = field('混合代理监听地址', s.mixedAddress || '127.0.0.1', {
+            placeholder:'127.0.0.1', help:'填写 IPv4 / IPv6 地址。127.0.0.1 仅供本机使用；局域网访问可填写路由器的 LAN 地址。自定义 listeners 在覆写中配置。' });
         var addressOptions = currentAddress !== '127.0.0.1' && currentAddress !== '0.0.0.0'
             ? [[currentAddress, currentAddress + ' · 自定义']] : [];
         var controllerAddress = field('控制器监听地址', currentAddress, { select: addressOptions.concat([
@@ -1037,7 +1132,7 @@ return view.extend({
         async function saveDefaults(apply) {
             var invalid = Array.from(form.querySelectorAll('input,select')).find(function(el) { return !el.disabled && !el.checkValidity(); });
             if (invalid) { invalid.reportValidity(); return; }
-            var settings = { controllerAddress: controllerAddress.read(), secret: secret.read() };
+            var settings = { controllerAddress: controllerAddress.read(), mixedAddress: mixedAddress.read(), secret: secret.read() };
             Object.keys(ports).forEach(function(k) { settings[k] = ports[k].read(); });
             var changed = {};
             Object.keys(settings).forEach(function(key) {
@@ -1060,7 +1155,7 @@ return view.extend({
         saveActions.classList.add('fii-settings-save');
         form.appendChild(E('section', { 'class': 'fii-card' }, [E('h3', {}, '连接与端口（默认值）'),
             E('p', { 'class': 'fii-muted' }, '这些数值在生成运行配置时作为默认值写入；覆写中显式配置的字段优先于此处，实际生效值可在输出预览中查看。'),
-            E('div', { 'class': 'fii-settings-grid fii-port-grid' }, Object.keys(ports).map(function(k) { return ports[k].node; }).concat(controllerAddress.node)),
+            E('div', { 'class': 'fii-settings-grid fii-port-grid' }, Object.keys(ports).map(function(k) { return ports[k].node; }).concat(mixedAddress.node, controllerAddress.node)),
             secret.node, saveActions, !canApply ? E('p', { 'class': 'fii-muted' }, '首次使用请先在输出页生成一份运行配置。') : '']));
         return E('div', {}, [this.corePanel(), this.mihomoBasics(), form,
             E('p', { 'class': 'fii-muted' }, 'Mihomo 的 DNS、规则、代理组和通用参数始终在覆写中配置；这里只提供内核与接入默认值。')]);

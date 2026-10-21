@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fii
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=43
+PKG_RELEASE:=45
 PKG_LICENSE:=GPL-3.0-or-later
 PKGARCH:=all
 

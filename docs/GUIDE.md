@@ -8,8 +8,8 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `fii_0.1.1-39_all.ipk` | 配置管理、内核下载器、rpcd、procd、DNS 与透明代理 |
-| `luci-app-fii_0.1.1-39_all.ipk` | LuCI 管理页面，中文界面 |
+| `fii_0.1.1-45_all.ipk` | 配置管理、内核下载器、rpcd、procd、DNS 与透明代理 |
+| `luci-app-fii_0.1.1-45_all.ipk` | LuCI 管理页面，中文界面 |
 | `SHA256SUMS` / `manifest.json` | 文件校验值及包信息 |
 
 先停止 Nikki、OpenClash 等已有透明代理的接管，避免监听端口和策略路由冲突。FII 下载的内核使用自己的 `/etc/fii/bin/mihomo` 路径，不覆盖其他插件或软件包的 `/usr/bin/mihomo`。
@@ -18,7 +18,7 @@
 
 ```sh
 opkg update
-opkg install /tmp/fii_0.1.1-39_all.ipk /tmp/luci-app-fii_0.1.1-39_all.ipk
+opkg install /tmp/fii_0.1.1-45_all.ipk /tmp/luci-app-fii_0.1.1-45_all.ipk
 ```
 
 依赖由已配置的 OpenWrt 软件源安装：`python3`、`python3-yaml`、`node`、`ucode` 及其 `fs` / `ubus` / `uloop` 模块、`rpcd-mod-ucode`、`rpcd-mod-file`、`uclient-fetch`、`ca-bundle`、`firewall4`、`ip-full`、`kmod-nft-tproxy`、`kmod-nft-socket`、`kmod-tun`、`kmod-dummy`、`luci-base`。内核模块必须与实际固件内核版本匹配，安装错误应先修复固件软件源，不要强制忽略依赖。
@@ -235,3 +235,12 @@ opkg remove luci-app-fii fii
 配置和下载的内核目录是 `/etc/fii/`，运行文件位于 `/tmp/fii/`。`/lib/upgrade/keep.d/fii` 将配置目录纳入 sysupgrade 保留范围。卸载应用时保留该目录，以便重新安装后继续使用。
 
 代码以 GPL-3.0-or-later 提供。参考项目与核心来源见 [NOTICE.md](../NOTICE.md)，验证记录与目标路由器验收步骤见 [验证记录](VALIDATION.md)。
+
+
+## 概览网址延迟测试
+
+概览页默认提供百度、Google（gstatic 的 generate_204）和 GitHub 卡片。点击“点击检测”或已有的耗时可重新测试，“全部测试”每次最多并发 3 个。通过“添加网站”输入名称和完整 HTTP(S) 地址；每个卡片可编辑或删除，最多保存 24 个，清空列表后不会重新补回默认项。列表随 FII 备份保存，修改后无需应用运行配置或重启内核。
+
+请求由路由器发起，遵循当前路由和本机代理接管策略，不受浏览器代理设置影响。显示从开始请求到首个响应头的耗时，包含 DNS、TCP 和 HTTPS 的 TLS 协商，不跟随重定向，也不下载响应正文。它用于判断网站响应情况，不能当作 ICMP Ping 或单个代理节点的延迟。HTTP 403/404 等同样保留耗时，并用红色提示状态；DNS、TLS、连接错误单独显示。测试最多等待 8 秒。
+
+仅手动触发请求；结果和测试时间保留在当前页面会话中，刷新后重新测试，不持久写入设备闪存。测试任务临时文件位于路由器的 `/tmp`。

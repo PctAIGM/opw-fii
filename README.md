@@ -2,13 +2,16 @@
 
 OpenWrt 上的 Mihomo 配置管理工具，围绕 **订阅源 → 覆写 → 输出配置** 组织日常使用。
 
-面向 OpenWrt 24.10 / x86_64（如 Intel J4125），当前版本 **0.1.1-43**，处于试用阶段。安装包仅包含应用，Mihomo 内核在页面中下载，支持 Release / Alpha 渠道。
+面向 OpenWrt 24.10 / x86_64（如 Intel J4125），当前版本 **0.1.1-45**，处于试用阶段。安装包仅包含应用，Mihomo 内核在页面中下载，支持 Release / Alpha 渠道。
+
+混合代理监听地址可在 **Mihomo → 连接与端口** 设置，默认仅本机。需要局域网访问时填写路由器的 LAN 地址，例如 `192.168.100.1`；额外的 Shadowsocks 等入站可通过覆写中的 `listeners` 配置，生成运行配置时会保留。
 
 ## 功能
 
 - **订阅管理**：URL、本地 YAML、分享链接，支持节点筛选与自动刷新。
 - **配置覆写**：YAML / RULES / JavaScript，支持全局与输出专属覆写。
 - **输出配置**：聚合订阅、预览、下载、校验并更新运行配置。
+- **概览测速**：路由器发起网址 HTTP 响应测试，支持手动添加、编辑、删除测试网站。
 - **控制面板**：代理组切换，GEO 数据与 ruleset 查看、更新。
 - **路由器接管**：REDIRECT / TPROXY / TUN、IPv4 / IPv6、DNS 与访问控制。
 - **日常维护**：内核管理、日志筛选、备份与迁移，支持手机和深色模式。
@@ -21,7 +24,7 @@ OpenWrt 上的 Mihomo 配置管理工具，围绕 **订阅源 → 覆写 → 输
 
 ```sh
 opkg update
-opkg install /tmp/fii_0.1.1-43_all.ipk /tmp/luci-app-fii_0.1.1-43_all.ipk
+opkg install /tmp/fii_0.1.1-45_all.ipk /tmp/luci-app-fii_0.1.1-45_all.ipk
 ```
 
 打开 **LuCI → 服务 → FII**：

@@ -59,16 +59,24 @@ def overlay(body, settings, warnings=None):
     from .mihomo import seed, dns_options
     seed(root, final=True)
     # These are owned by the router integration. User overrides cannot desynchronise routing.
-    for key in ("port", "socks-port", "listeners", "external-controller-tls", "external-controller-unix",
+    for key in ("port", "socks-port", "external-controller-tls", "external-controller-unix",
                 "external-controller-pipe", "external-ui", "external-ui-url", "external-ui-name",
                 "authentication", "lan-allowed-ips", "lan-disallowed-ips"):
         root.pop(key, None)
     def prefer(key, value):
         # Router settings act as defaults; an explicit override value always wins.
         root.setdefault(key, value)
+    listeners = root.get('listeners')
+    if listeners is None:
+        listeners = []
+    check(isinstance(listeners, list) and all(isinstance(item, dict) for item in listeners), 'listeners 必须是监听器对象列表')
+    # Explicit custom listeners retain all fields, including users and routing.
+    # A user-supplied fii-mixed entry replaces the generated default by name.
+    if not any(item.get('name') == 'fii-mixed' for item in listeners):
+        listeners = [{"name": "fii-mixed", "type": "mixed", "listen": settings["mixedAddress"],
+                      "port": settings["mixedPort"]}] + listeners
     root.update({"mixed-port": 0, "allow-lan": True, "bind-address": "*",
-                 "listeners": [{"name": "fii-mixed", "type": "mixed", "listen": "127.0.0.1", "port": settings["mixedPort"]}],
-                 "routing-mark": BYPASS_MARK})
+                 "listeners": listeners, "routing-mark": BYPASS_MARK})
     prefer("redir-port", settings["redirPort"] if protocols["tcp"] == "redirect" else 0)
     prefer("tproxy-port", settings["tproxyPort"] if "tproxy" in protocols.values() else 0)
     prefer("external-controller", controller_listen(settings))
@@ -101,6 +109,8 @@ def overlay(body, settings, warnings=None):
         changed = []
         def differences(before, after, prefix=""):
             for key, value in before.items():
+                if not prefix and key == 'listeners':
+                    continue  # Custom entries are preserved; adding the default is not an override loss.
                 label = prefix + str(key)
                 if isinstance(value, dict) and isinstance(after.get(key), dict):
                     differences(value, after[key], label + ".")

@@ -109,6 +109,15 @@ class MaintenanceSettingsTests(unittest.TestCase):
 
 
 class CoreEnvironmentTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TestDirectory()
+        self.env = patch.dict(os.environ, {"FII_ROOT": self.tmp.name})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
     def test_environment_mapping(self):
         env = runtime.core_environment({"goMaxProcs": 0, "goMemLimit": 0, "disableQuicGso": False,
                                         "disableQuicEcn": False, "skipCoreIpv6Check": False})

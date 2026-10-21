@@ -361,6 +361,12 @@ test('old metadata schema and virtual migration editors use the validator', func
     fs.rename(root + '/tmp/fii/view.next', root + '/tmp/fii/state-view.json');
     check(invoke('get', { compact: true }).error == 'worker-fallback:get', 'old schema is not served');
     view.schema = 2;
+    let sites = view.data.settings.urlTestSites;
+    delete view.data.settings.urlTestSites;
+    write(root + '/tmp/fii/view.next', sprintf('%J', view));
+    fs.rename(root + '/tmp/fii/view.next', root + '/tmp/fii/state-view.json');
+    check(invoke('get', { compact: true }).error == 'worker-fallback:get', 'pre-upgrade site defaults use validator');
+    view.data.settings.urlTestSites = sites;
     push(view.data.overrides, { id: 'virtual-base', name: 'Migrated policy', type: 'YAML', contentOmitted: true });
     write(root + '/tmp/fii/view.next', sprintf('%J', view));
     fs.rename(root + '/tmp/fii/view.next', root + '/tmp/fii/state-view.json');

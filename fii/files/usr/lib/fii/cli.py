@@ -65,10 +65,10 @@ def prepare():
     from .runtime import prepare as operation
     return operation()
 
-READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "resources", "core_info", "core_check", "network", "transfer_read")
+READ_METHODS = ("get", "status", "preview", "export", "logs", "job", "nodes", "groups", "resources", "url_test", "core_info", "core_check", "network", "transfer_read")
 WRITE_METHODS = ("save", "refresh", "apply", "service", "import", "import_preview", "select", "resource_update", "core_update", "core_channel",
                  "transfer_begin", "transfer_append", "transfer_invoke", "transfer_release", "transfer_status")
-LONG_METHODS = ("refresh", "apply", "service", "resource_update", "core_update", "core_check", "import", "import_preview", "save", "preview")
+LONG_METHODS = ("url_test", "refresh", "apply", "service", "resource_update", "core_update", "core_check", "import", "import_preview", "save", "preview")
 
 
 def background(method, payload):
@@ -181,7 +181,8 @@ def compact_data(store):
         stamp = signature()
         try:
             cached = json.loads(path.read_text(encoding='utf-8'))
-            if cached.get('schema') == 2 and cached['stamp'] == stamp:
+            if (cached.get('schema') == 2 and cached['stamp'] == stamp
+                    and isinstance(cached.get('data', {}).get('settings', {}).get('urlTestSites'), list)):
                 return cached['data']
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -383,6 +384,9 @@ def dispatch(method, payload=None, progress=None):
     if method == 'resources':
         from .resources import view
         return view()
+    if method == 'url_test':
+        from .urltest import test_site
+        return test_site(payload.get('id'), payload.get('url'))
     if method == 'resource_update':
         from .resources import update
         return update(payload.get('kind'), payload.get('name'), progress)
@@ -479,7 +483,9 @@ def dispatch(method, payload=None, progress=None):
         with lock():
             store.save(new_data, payload.get("revision"), validated=True)
             summary = cache_view(store, new_data)
-        return {"data": summary if payload.get('compact') else new_data, "message": "已保存；运行配置需在输出页点击应用"}
+        sites_only = payload.get('patch', {}).keys() == {'settings'} and payload['patch']['settings'].keys() == {'urlTestSites'}
+        return {"data": summary if payload.get('compact') else new_data,
+                "message": "测试网站已保存，无需应用运行配置" if sites_only else "已保存；运行配置需在输出页点击应用"}
     if method in ("import", "import_preview"):
         if method == 'import_preview' and payload.get('stage'):
             check(type(payload.get('revision')) is int and payload['revision'] == data['revision'],
