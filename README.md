@@ -2,7 +2,7 @@
 
 OpenWrt 上的 Mihomo 配置管理工具，围绕 **订阅源 → 覆写 → 输出配置** 组织日常使用。
 
-面向 OpenWrt 24.10 / x86_64（如 Intel J4125），当前版本 **0.1.1-42**，处于试用阶段。安装包仅包含应用，Mihomo 内核在页面中下载，支持 Release / Alpha 渠道。
+面向 OpenWrt 24.10 / x86_64（如 Intel J4125），当前版本 **0.1.1-43**，处于试用阶段。安装包仅包含应用，Mihomo 内核在页面中下载，支持 Release / Alpha 渠道。
 
 ## 功能
 
@@ -21,7 +21,7 @@ OpenWrt 上的 Mihomo 配置管理工具，围绕 **订阅源 → 覆写 → 输
 
 ```sh
 opkg update
-opkg install /tmp/fii_0.1.1-42_all.ipk /tmp/luci-app-fii_0.1.1-42_all.ipk
+opkg install /tmp/fii_0.1.1-43_all.ipk /tmp/luci-app-fii_0.1.1-43_all.ipk
 ```
 
 打开 **LuCI → 服务 → FII**：

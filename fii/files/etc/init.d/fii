@@ -28,6 +28,19 @@ stop_service() {
     /usr/bin/fii firewall-down
 }
 
+boot() {
+    # Delay only the boot path; manual start stays immediate. The wait runs in
+    # the background so a long delay cannot hold up the rest of the boot chain.
+    local delay
+    delay="$(/usr/bin/fii boot-delay 2>/dev/null)"
+    case "$delay" in ''|*[!0-9]*) delay=0 ;; esac
+    if [ "$delay" -gt 0 ]; then
+        ( sleep "$delay"; start ) < /dev/null > /dev/null 2>&1 &
+    else
+        start
+    fi
+}
+
 service_triggers() {
     procd_add_reload_interface_trigger "lan"
 }

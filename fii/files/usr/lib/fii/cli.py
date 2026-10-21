@@ -269,6 +269,34 @@ def refresh_one(kind, ident):
         return {"success": success, "message": "刷新成功" if success else updated["lastError"]}
 
 
+def restart_due(settings, bundle):
+    """Daily service restart, checked by the per-minute scheduler.
+
+    Fires when the wall clock reaches the configured HH:MM while the service
+    is expected to be running. The marker is written before restarting so a
+    duplicate cron pass or a clock jump cannot loop the service; anything
+    within the last 12 hours counts as already done.
+    """
+    if not settings.get("scheduledRestart") or bundle is None:
+        return False
+    if time.strftime("%H:%M") != settings.get("restartTime"):
+        return False
+    marker = rooted("/etc/fii/scheduler.json")
+    try:
+        last = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        last = {}
+    last_at = last.get("restartAt")
+    if type(last_at) is int and time.time() - last_at < 12 * 3600:
+        return False
+    from .runtime import service_active
+    if not service_active():
+        return False
+    write_json(marker, {"restartAt": int(time.time())})
+    run([INIT, "restart"], timeout=20)
+    return True
+
+
 def scheduled():
     with lock("scheduler", timeout=0):
         with lock():
@@ -289,6 +317,7 @@ def scheduled():
         bundle = active()
         if changed and data["settings"]["autoApply"] and bundle and ready(bundle):
             activate(bundle["outputId"])
+        restart_due(data["settings"], bundle)
 
 
 def dispatch(method, payload=None, progress=None):
@@ -512,6 +541,9 @@ def main():
             sys.exit(0 if ready() else 1)
         elif args == ["scheduled"]:
             scheduled()
+        elif args == ["boot-delay"]:
+            delay = Store().read()["settings"].get("bootDelay", 0)
+            print(delay if type(delay) is int else 0)
         elif args == ["firewall-up"]:
             from .runtime import firewall_up
             firewall_up()

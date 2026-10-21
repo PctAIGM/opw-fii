@@ -1,6 +1,8 @@
 #!/bin/sh
 # Every exit, including core crashes, removes interception before procd respawns us.
 umask 077
+# Runtime tuning (GOMAXPROCS, GOMEMLIMIT, quic-go switches) prepared per start.
+[ -f /tmp/fii/core-env ] && . /tmp/fii/core-env
 child=
 # shellcheck disable=SC2329
 cleanup() {

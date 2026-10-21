@@ -25,6 +25,9 @@ def defaults():
             "lanProxy": True, "routerProxy": False, "udpProxy": True,
             "routerDnsHijack": True, "dnsIpv6Hijack": True,
             "lanAccessMode": "all", "lanAccess": [], "routerBypassUsers": [],
+            "bootDelay": 0, "scheduledRestart": False, "restartTime": "03:00",
+            "goMaxProcs": 0, "goMemLimit": 0, "disableQuicGso": False,
+            "disableQuicEcn": False, "skipCoreIpv6Check": False,
         },
     }
 
@@ -155,13 +158,22 @@ def validate(data):
         settings.setdefault(key, setting_defaults[key])
     validate_proxy(settings)
     for key in ("lanProxy", "routerProxy", "udpProxy", "routerDnsHijack", "dnsIpv6Hijack", "lanAccessMode",
-                "lanAccess", "routerBypassUsers"):
+                "lanAccess", "routerBypassUsers", "bootDelay", "scheduledRestart", "restartTime",
+                "goMaxProcs", "goMemLimit", "disableQuicGso", "disableQuicEcn", "skipCoreIpv6Check"):
         if key not in settings:
             settings[key] = setting_defaults[key]
     settings.setdefault("controllerAddress", setting_defaults["controllerAddress"])
     for key in ("autostart", "autoApply", "ipv6", "dnsHijack", "lanProxy", "routerProxy", "udpProxy",
-                "routerDnsHijack", "dnsIpv6Hijack"):
+                "routerDnsHijack", "dnsIpv6Hijack", "scheduledRestart", "disableQuicGso",
+                "disableQuicEcn", "skipCoreIpv6Check"):
         check(type(settings.get(key)) is bool, key + "必须是布尔值")
+    check(type(settings["bootDelay"]) is int and 0 <= settings["bootDelay"] <= 600,
+          "开机延迟必须是 0–600 秒")
+    check(bool(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", settings["restartTime"])), "重启时间必须是 HH:MM")
+    check(type(settings["goMaxProcs"]) is int and 0 <= settings["goMaxProcs"] <= 64,
+          "GOMAXPROCS 必须是 0–64（0 表示不限制）")
+    check(type(settings["goMemLimit"]) is int and 0 <= settings["goMemLimit"] <= 65536,
+          "内核内存上限必须是 0–65536 MiB（0 表示不限制）")
     check(settings.get("mode") in ("tproxy", "redirect", "core"), "透明代理模式无效")
     ports = [settings.get(k) for k in ("mixedPort", "redirPort", "tproxyPort", "dnsPort", "controllerPort")]
     check(all(type(p) is int and 1024 <= p <= 65535 for p in ports), "端口必须为 1024–65535")

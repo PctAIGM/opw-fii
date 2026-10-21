@@ -1418,6 +1418,14 @@ return view.extend({
         var dns6 = toggle('接管 IPv6 DNS', s.dnsIpv6Hijack && (s.dnsFamilyIndependent || s.ipv6));
         var boot = toggle('开机自动启动', s.autostart);
         var auto = toggle('订阅更新后自动应用', s.autoApply, '刷新成功后更新当前输出，校验失败时保留运行配置。');
+        var bootDelay = field('开机启动延迟（秒）', s.bootDelay || 0, { type: 'number', min: 0, max: 600, required: true, help: '开机后等待指定秒数再启动服务，等待 WAN 与 DNS 就绪；手动启动不受影响。' });
+        var restart = toggle('定时重启服务', !!s.scheduledRestart, '每天在设定时间重启内核与服务，仅当服务正在运行时执行。');
+        var restartAt = field('每日重启时间', s.restartTime || '03:00', { type: 'time', required: true });
+        var procs = field('内核最大并行数（GOMAXPROCS）', s.goMaxProcs || 0, { type: 'number', min: 0, max: 64, required: true, help: '0 表示按系统默认。' });
+        var memLimit = field('内核内存上限（MiB）', s.goMemLimit || 0, { type: 'number', min: 0, max: 65536, required: true, help: '对应 GOMEMLIMIT，0 表示不限制；小内存路由器可限制内核占用。' });
+        var quicGso = toggle('禁用 QUIC GSO', !!s.disableQuicGso, '内核或网卡不支持 UDP GSO 时开启，避免 QUIC 吞吐异常。');
+        var quicEcn = toggle('禁用 QUIC ECN', !!s.disableQuicEcn, 'QUIC 显式拥塞通知异常时开启。');
+        var ipv6Check = toggle('跳过系统 IPv6 检查', !!s.skipCoreIpv6Check, '仅在系统禁用 IPv6 且内核启动报错时开启。');
         var bypass = entries('直接连接的目标网段', s.bypass, '203.0.113.0/24');
         var china4 = toggle('绕过中国大陆 IPv4', !!s.bypassChina4), china6 = toggle('绕过中国大陆 IPv6', !!s.bypassChina6);
         var dscp = entries('绕过 DSCP', s.bypassDscp || [], '0–63');
@@ -1453,7 +1461,10 @@ return view.extend({
             E('div', { 'class': 'fii-settings-grid' }, [tcpPorts.node, udpPorts.node]), E('div', { 'class': 'fii-settings-grid' }, [dscp.node, marks.node]), bypass.node])]);
         var miscPanel = E('div', {}, [card('保留地址', [E('p', { 'class': 'fii-muted' }, '保留地址直接连接，Fake-IP 地址仍按代理规则处理。'), E('div', { 'class': 'fii-settings-grid' }, [reserved4.node, reserved6.node])]),
             card('TUN 接口等待', [E('p', { 'class': 'fii-muted' }, '设置路由器等待接口就绪的时间。Mihomo 的 TUN 协议栈与 MTU 在覆写中配置。'), E('div', { 'class': 'fii-settings-grid' }, [tunTimeout.node, tunInterval.node])])]);
-        var servicePanel = E('div', {}, [card('启动与更新', [boot.node, auto.node]), card('订阅下载', [agent.node])]);
+        var servicePanel = E('div', {}, [card('启动与更新', [boot.node, bootDelay.node, restart.node, restartAt.node, auto.node]),
+            card('内核运行环境', [E('p', { 'class': 'fii-muted' }, '以下参数以环境变量形式传给 Mihomo 内核，应用新配置后生效。'),
+                E('div', { 'class': 'fii-settings-grid' }, [procs.node, memLimit.node]), quicGso.node, quicEcn.node, ipv6Check.node]),
+            card('订阅下载', [agent.node])]);
         var proxyPanel = E('div', {}, panels);
         var backups = card('备份与迁移', [E('p', {}, '导入 FII 或 SubConverter Flutter 备份，迁移订阅、覆写和输出，保留当前路由器设置。'), actions([
             button('导出备份', async function() { var r = await call('export'); download('fii-backup.json', JSON.stringify(r.data, null, 2)); }),
@@ -1481,9 +1492,10 @@ return view.extend({
             routerDns.control.disabled = !transparent || !router.read();
             directDnsNotice.hidden = !transparent || !router.read() || !routerDns.read();
             [ipv4, ipv6, dns4, dns6, ping].forEach(function(f) { f.control.disabled = !transparent; });
+            restartAt.control.disabled = !restart.read();
             scopeInfo.textContent = !transparent ? '仅提供代理和 DNS 监听服务。' : [lan.read() ? '局域网设备' : '', router.read() ? '路由器本机' : ''].filter(Boolean).join('、') + (lan.read() || router.read() ? '的流量交由 Mihomo 规则处理。' : '请选择需要代理的流量范围。');
         }
-        [master, mode, udpMode, lan, router, ipv6, dns, routerDns].forEach(function(f) { f.control.addEventListener('change', updateVisibility); });
+        [master, mode, udpMode, lan, router, ipv6, dns, routerDns, restart].forEach(function(f) { f.control.addEventListener('change', updateVisibility); });
         updateVisibility(); showSection(currentSection);
         async function saveSettings(apply) {
                 // Hidden sections can still contain invalid fields; reveal the first one.
@@ -1503,7 +1515,10 @@ return view.extend({
                     interfaces: interfaces.read(), ipv6: ipv6.read(), dnsHijack: dns.read(),
                     lanProxy: lan.read(), routerProxy: router.read(), udpProxy: udpMode.read() !== 'off', routerDnsHijack: routerDns.read(), dnsIpv6Hijack: dns6.read(),
                     lanRules: lanAcl.read(), routerRules: routerAcl.read(), lanBypassDevices: directDevices.read(),
-                    autostart: boot.read(), autoApply: auto.read(), bypass: bypass.read(), userAgent: agent.read() });
+                    autostart: boot.read(), autoApply: auto.read(), bypass: bypass.read(), userAgent: agent.read(),
+                    bootDelay: bootDelay.read(), scheduledRestart: restart.read(), restartTime: restartAt.read(),
+                    goMaxProcs: procs.read(), goMemLimit: memLimit.read(), disableQuicGso: quicGso.read(),
+                    disableQuicEcn: quicEcn.read(), skipCoreIpv6Check: ipv6Check.read() });
                 var changedSettings = {};
                 Object.keys(settings).forEach(function(key) {
                     if (JSON.stringify(settings[key]) !== JSON.stringify(self.data.settings[key])) changedSettings[key] = settings[key];

@@ -60,7 +60,7 @@ Ruleset 列表在运行时读取内核 `/providers/rules`，显示名称、来�
 | 绕过设置 | 中国大陆 IPv4 / IPv6；TCP / UDP 目标端口范围与常用端口预设；DSCP；FWMark / 掩码；额外直连网段 |
 | 其他设置 | IPv4 / IPv6 保留地址；TUN 接口等待时间与检查间隔 |
 | DNS 接管 | 只决定局域网 / 本机的 DNS 请求是否交给 Mihomo；DNS 模式、解析服务器与过滤在覆写中管理 |
-| 运行设置 | 开机启动、订阅更新后自动应用、下载 User-Agent；端口与控制器默认值在 Mihomo 页面管理 |
+| 运行设置 | 开机启动与开机延迟；每日定时重启；订阅更新后自动应用；内核运行环境（GOMAXPROCS、GOMEMLIMIT、QUIC GSO/ECN、跳过 IPv6 检查）；下载 User-Agent；端口与控制器默认值在 Mihomo 页面管理 |
 | 备份与迁移 | FII / SubConverter Flutter 备份导入与导出 |
 
 访问规则从上到下匹配，**第一条命中决定行为**；一条规则内任一条件匹配即可命中，条件为空时匹配全部。未命中任何规则的流量维持原路径。可用“直连流量、接管 DNS”或“代理流量、保留原 DNS”等组合。旧版设备范围与系统用户绕过在页面保存时转换成等价规则。
@@ -84,6 +84,8 @@ SubConverter Flutter 备份中的覆写按 `sortOrder`、ID 恢复原应用的�
 TUN 支持与 REDIRECT、TPROXY 混用。FII 管理独立策略路由，不开启 Mihomo 的全局自动路由。核心出站标记绕过所有接管规则；停止服务会清理 TPROXY / TUN 路由、nft 表和 FII 的 IPv6 Fake-IP 虚拟接口。使用 TUN 需要固件匹配的 `kmod-tun`，IPv6 Fake-IP 路由需要 `kmod-dummy`。
 
 大陆地址列表随安装包提供，来源与快照版本见 `NOTICE.md`。保留地址、DSCP 和端口范围不会放走 Fake-IP 流量；FWMark 与访问规则仍可明确绕过。更改运行设置后可直接“保存并更新配置”。
+
+**运行维护**：开机延迟仅在系统启动路径生效（后台等待后启动，不阻塞其他服务），手动启动不受影响。定时重启由每分钟的调度任务检查，到达设定的每日时间且服务正在运行时执行一次重启；12 小时内的重复触发会被抑制，停止状态不会被动拉起。内核运行环境以环境变量注入（`GOMAXPROCS`、`GOMEMLIMIT`、`QUIC_GO_DISABLE_GSO`、`QUIC_GO_DISABLE_ECN`、`SKIP_SYSTEM_IPV6_CHECK`），随“更新运行配置”在下次内核启动时生效。启用 TPROXY 时若检测到 `br_netfilter` 将桥接流量送入 iptables（常见于安装 Docker / 桥接防火墙的路由器），FII 会临时关闭对应的 `bridge-nf-call-iptables` / `bridge-nf-call-ip6tables`，停止接管或关闭 TPROXY 时恢复原值；仅改回 FII 动过的开关，未加载该模块时不做任何事。
 
 ## 页面内下载和更新内核
 

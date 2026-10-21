@@ -4,7 +4,7 @@ LUCI_TITLE:=FII - Simple Mihomo Manager
 LUCI_DEPENDS:=+fii +rpcd-mod-file +cgi-io
 LUCI_PKGARCH:=all
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=42
+PKG_RELEASE:=43
 PKG_LICENSE:=GPL-3.0-or-later
 
 define Package/luci-app-fii/postinst

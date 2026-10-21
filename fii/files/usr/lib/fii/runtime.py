@@ -18,6 +18,8 @@ BYPASS_MARK = 0xF100
 PROXY_MARK = 0xF101
 ROUTE_TABLE = 20230
 ROUTE_PRIORITY = 30000
+BRIDGE_SYSCTL = {"ipv4": "net.bridge.bridge-nf-call-iptables",
+                 "ipv6": "net.bridge.bridge-nf-call-ip6tables"}
 
 
 def dump(*args, **kwargs):
@@ -305,12 +307,32 @@ def core_test(body):
         candidate.unlink(missing_ok=True)
 
 
+def core_environment(settings):
+    """Go runtime knobs for the core process, sourced by core-run at start."""
+    env = {}
+    if settings.get("goMaxProcs"):
+        env["GOMAXPROCS"] = str(settings["goMaxProcs"])
+    if settings.get("goMemLimit"):
+        env["GOMEMLIMIT"] = "%dMiB" % settings["goMemLimit"]
+    if settings.get("disableQuicGso"):
+        env["QUIC_GO_DISABLE_GSO"] = "1"
+    if settings.get("disableQuicEcn"):
+        env["QUIC_GO_DISABLE_ECN"] = "1"
+    if settings.get("skipCoreIpv6Check"):
+        env["SKIP_SYSTEM_IPV6_CHECK"] = "1"
+    return env
+
+
 def prepare():
     bundle = active()
     check(bundle is not None, "请先在输出页应用一个配置")
     core_test(bundle["yaml"])
     atomic_write(rooted("/tmp/fii/config.yaml"), bundle["yaml"])
     atomic_write(rooted("/tmp/fii/firewall.nft"), nftables(bundle["settings"], bundle["yaml"]))
+    import shlex
+    atomic_write(rooted("/tmp/fii/core-env"),
+                 "".join("export %s=%s\n" % (key, shlex.quote(value))
+                         for key, value in core_environment(bundle["settings"]).items()))
 
 
 def fake6_link():
@@ -319,6 +341,31 @@ def fake6_link():
         return links[0] if links else None
     except (ValueError, IndexError):
         return None
+
+
+def bridge_netfilter_quiet(settings):
+    """TPROXY cannot intercept bridged traffic while br_netfilter defers it to
+    iptables. Flip the sysctls we found enabled and flag each flip so the
+    restore path puts back exactly what this service changed."""
+    enabled = {"ipv4": settings["ipv4Proxy"], "ipv6": settings["ipv6"]}
+    flags = rooted("/tmp/fii")
+    flags.mkdir(parents=True, exist_ok=True)
+    flipped = []
+    for family, key in BRIDGE_SYSCTL.items():
+        if not enabled[family] or run(["/sbin/sysctl", "-n", key], required=False).strip() != "1":
+            continue
+        run(["/sbin/sysctl", "-q", "-w", key + "=0"])
+        (flags / ("bridge-nf-" + family)).write_text("", encoding="utf-8")
+        flipped.append(key)
+    return flipped
+
+
+def bridge_netfilter_restore():
+    for family, key in BRIDGE_SYSCTL.items():
+        flag = rooted("/tmp/fii/bridge-nf-" + family)
+        if flag.exists():
+            run(["/sbin/sysctl", "-q", "-w", key + "=1"], required=False)
+            flag.unlink(missing_ok=True)
 
 
 def remove_old_fake6_routes(keep):
@@ -357,9 +404,10 @@ def firewall_down_unlocked():
         run(["/sbin/ip", family, "route", "del", "local", "default", "dev", "lo", "table", str(ROUTE_TABLE)], required=False)
         run(["/sbin/ip", family, "rule", "del", "priority", "30001", "fwmark", "0xf102/0xffff", "lookup", "20231"], required=False)
         run(["/sbin/ip", family, "route", "del", "default", "dev", "fii-tun", "table", "20231"], required=False)
-    link = fake6_link()
-    if link and link.get("ifalias") == "fii-fake-ip" and link.get("linkinfo", {}).get("info_kind") == "dummy":
-        run(["/sbin/ip", "link", "del", "dev", "fii-dummy"], required=False)
+        link = fake6_link()
+        if link and link.get("ifalias") == "fii-fake-ip" and link.get("linkinfo", {}).get("info_kind") == "dummy":
+            run(["/sbin/ip", "link", "del", "dev", "fii-dummy"], required=False)
+    bridge_netfilter_restore()
     rooted("/tmp/fii/ready").unlink(missing_ok=True)
 
 
@@ -449,6 +497,8 @@ def firewall_up():
                     current_rules = run(["/sbin/ip", family, "rule", "show", "priority", priority])
                     if not current_rules:
                         run(["/sbin/ip", family, "rule", "add", "priority", priority, "fwmark", mark, "lookup", table])
+            if "tproxy" in protocols.values():
+                bridge_netfilter_quiet(settings)
             run(["/usr/sbin/nft", "-f", str(path)])
             atomic_write(rooted("/tmp/fii/ready"), "transparent\n")
         except ValueError:
