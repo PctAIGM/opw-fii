@@ -6,14 +6,12 @@ import json
 LEGACY_KEYS = {'dnsMode', 'fakeIpFilter', 'nameservers', 'defaultNameservers',
                'proxyNameservers', 'localDns', 'tunStack', 'tunMtu'}
 DEFAULTS = {
-    'ipv6': False,
     'dns': {'enable': True, 'ipv6': False, 'enhanced-mode': 'fake-ip',
             'fake-ip-range': '198.18.0.1/16', 'fake-ip-range6': 'fc00::/18',
             'nameserver': ['https://dns.alidns.com/dns-query', 'https://doh.pub/dns-query'],
             'default-nameserver': ['223.5.5.5', '119.29.29.29'],
             'fake-ip-filter': ['+.lan', '+.local'],
             'nameserver-policy': {'+.lan': ['127.0.0.1:53'], '+.local': ['127.0.0.1:53']}},
-    'tun': {'stack': 'mixed', 'mtu': 1500},
     'profile': {'store-selected': True, 'store-fake-ip': True},
 }
 

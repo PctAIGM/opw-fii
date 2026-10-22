@@ -13,8 +13,6 @@ from .model import check, exhausted
 
 BASE = """mixed-port: 7890
 allow-lan: false
-mode: rule
-log-level: info
 proxy-groups:
   - name: PROXY
     type: select

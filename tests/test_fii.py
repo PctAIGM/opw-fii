@@ -511,10 +511,29 @@ class NetworkGenerationTests(unittest.TestCase):
                            ("dnsMode", "unknown"), ("defaultNameservers", ["dns.example.com"]),
                            ("localDns", "127.0.0.1:1053"), ("interfaces", ["lo"]),
                            ("controllerAddress", "192.168.1.1:9090"), ("controllerAddress", "router.lan"),
-                           ("controllerAddress", 9090)]:
+                           ("controllerAddress", 9090), ("coreMode", "bogus"), ("logLevel", "trace"),
+                           ("findProcessMode", "auto"), ("keepAliveInterval", 0), ("keepAliveIdle", 3601),
+                           ("geoUpdateInterval", 0), ("unifiedDelay", 1), ("etagSupport", "on"),
+                           ("geoxUrls", {"unknown": "https://example.com/x"}), ("geoxUrls", {"geoip": "ftp://example.com/x"}),
+                           ("geoxUrls", {"geoip": "not a url"}), ("geoxUrls", ["https://example.com/x"]),
+                           ("externalUi", "/etc/ui"), ("externalUi", "a b"), ("externalUi", "../ui"),
+                           ("externalUiName", "a/b"), ("externalUiUrl", "https://example.com/x"),
+                           ("externalUiName", "xd"),
+                           ("snifferHttpPorts", [0]), ("snifferTlsPorts", [70000]), ("snifferQuicPorts", ["443"]),
+                           ("snifferHttpPorts", "80"), ("snifferSkipDomain", [123]), ("snifferSkipDomain", [""]),
+                           ("coreTunStack", "bogus"), ("coreTunStack", "mips"), ("coreTunMtu", 1279),
+                           ("coreTunMtu", 9001), ("coreTunMtu", "1500"), ("tunGsoMaxSize", 0),
+                           ("tunGsoMaxSize", 1048577)]:
             with self.subTest(key=key, value=value):
                 data = sample()
                 data["settings"][key] = value
+                with self.assertRaises(ValueError):
+                    model.validate(data)
+        for key in ("snifferEnable", "snifferForceDnsMapping", "snifferParsePureIp", "snifferOverrideDestination",
+                    "tunGso", "tunEndpointIndependentNat"):
+            with self.subTest(key=key):
+                data = sample()
+                data["settings"][key] = "on"
                 with self.assertRaises(ValueError):
                     model.validate(data)
 
@@ -549,6 +568,140 @@ class NetworkGenerationTests(unittest.TestCase):
         config = render.load_map(runtime.overlay("", settings))
         self.assertEqual(config["external-controller"], "127.0.0.1:9090")
         self.assertEqual(config["tproxy-port"], settings["tproxyPort"])
+
+    def test_general_defaults_seed_runtime_and_overrides_win(self):
+        settings = model.defaults()["settings"]
+        config = render.load_map(runtime.overlay("", settings))
+        self.assertEqual(config["mode"], "rule")
+        self.assertEqual(config["log-level"], "info")
+        self.assertEqual(config["find-process-mode"], "off")
+        self.assertFalse(config["ipv6"])
+        self.assertEqual(config["keep-alive-interval"], 15)
+        self.assertEqual(config["keep-alive-idle"], 15)
+        self.assertFalse(config["unified-delay"])
+        self.assertFalse(config["tcp-concurrent"])
+        self.assertFalse(config["geodata-mode"])
+        self.assertTrue(config["geo-auto-update"])
+        self.assertEqual(config["geo-update-interval"], 24)
+        self.assertNotIn("geox-url", config)
+        self.assertTrue(config["etag-support"])
+        tuned = dict(settings, coreMode="direct", logLevel="debug", findProcessMode="strict", keepAliveInterval=30,
+                     keepAliveIdle=120, unifiedDelay=True, tcpConcurrent=True, geodataMode=True,
+                     coreIpv6=True, geoAutoUpdate=False, geoUpdateInterval=48, etagSupport=False,
+                     geoxUrls={"geoip": "https://example.com/geoip.dat"})
+        config = render.load_map(runtime.overlay("", tuned))
+        self.assertEqual(config["mode"], "direct")
+        self.assertEqual(config["log-level"], "debug")
+        self.assertEqual(config["find-process-mode"], "strict")
+        self.assertTrue(config["ipv6"])
+        self.assertEqual(config["keep-alive-interval"], 30)
+        self.assertEqual(config["keep-alive-idle"], 120)
+        self.assertTrue(config["unified-delay"])
+        self.assertTrue(config["tcp-concurrent"])
+        self.assertTrue(config["geodata-mode"])
+        self.assertFalse(config["geo-auto-update"])
+        self.assertEqual(config["geo-update-interval"], 48)
+        # Only user-supplied kinds are written; the core fills the rest itself.
+        self.assertEqual(config["geox-url"], {"geoip": "https://example.com/geoip.dat"})
+        self.assertFalse(config["etag-support"])
+        self.assertNotIn("external-ui", config)
+        self.assertNotIn("external-ui-name", config)
+        self.assertNotIn("external-ui-url", config)
+        dashboard = dict(tuned, externalUi="ui", externalUiName="metacubexd",
+                         externalUiUrl="https://example.com/dashboard.zip")
+        config = render.load_map(runtime.overlay("", dashboard))
+        self.assertEqual(config["external-ui"], "ui")
+        self.assertEqual(config["external-ui-name"], "metacubexd")
+        self.assertEqual(config["external-ui-url"], "https://example.com/dashboard.zip")
+        # Explicit overrides keep their values; the settings only fill absent fields.
+        config = render.load_map(runtime.overlay("mode: global\nlog-level: warning\nkeep-alive-interval: 45\nipv6: true\ngeox-url: {mmdb: 'https://o.example.com/mmdb'}\nexternal-ui: panel\n", tuned))
+        self.assertEqual(config["mode"], "global")
+        self.assertEqual(config["log-level"], "warning")
+        self.assertEqual(config["keep-alive-interval"], 45)
+        self.assertEqual(config["find-process-mode"], "strict")
+        self.assertTrue(config["ipv6"])
+        self.assertEqual(config["geox-url"], {"mmdb": "https://o.example.com/mmdb"})
+        # An override dashboard directory is no longer stripped by the runtime overlay.
+        self.assertEqual(config["external-ui"], "panel")
+        self.assertNotIn("external-ui-name", config)
+
+    def test_general_defaults_backfill_on_old_state(self):
+        data = sample()
+        new_keys = ("coreMode", "logLevel", "findProcessMode", "coreIpv6", "unifiedDelay", "tcpConcurrent",
+                    "keepAliveInterval", "keepAliveIdle", "geodataMode", "geoAutoUpdate",
+                    "geoUpdateInterval", "geoxUrls", "etagSupport",
+                    "snifferEnable", "snifferForceDnsMapping", "snifferParsePureIp",
+                    "snifferOverrideDestination", "snifferHttpPorts", "snifferTlsPorts",
+                    "snifferQuicPorts", "snifferSkipDomain",
+                    "coreTunStack", "coreTunMtu", "tunGso", "tunGsoMaxSize", "tunEndpointIndependentNat",
+                    "externalUi", "externalUiName", "externalUiUrl")
+        for key in new_keys:
+            data["settings"].pop(key, None)
+        model.validate(data)
+        expected = model.defaults()["settings"]
+        for key in new_keys:
+            self.assertEqual(data["settings"][key], expected[key], key)
+        # Blank GEO addresses are dropped instead of reaching the running config.
+        data["settings"]["geoxUrls"] = {"geoip": "  ", "geosite": "https://example.com/geosite.dat"}
+        model.validate(data)
+        self.assertEqual(data["settings"]["geoxUrls"], {"geosite": "https://example.com/geosite.dat"})
+
+    def test_sniffer_defaults_seed_runtime_and_partial_overrides_win(self):
+        settings = model.defaults()["settings"]
+        config = render.load_map(runtime.overlay("", settings))
+        self.assertEqual(config["sniffer"], {
+            "enable": True, "force-dns-mapping": True, "parse-pure-ip": True, "override-destination": False,
+            "sniff": {"HTTP": {"ports": [80, 8080, 8880]}, "TLS": {"ports": [443, 8443]}, "QUIC": {"ports": [443, 8443]}},
+            "skip-domain": ["+.lan", "+.local", "+.home.arpa", "Mijia Cloud"]})
+        tuned = dict(settings, snifferEnable=False, snifferOverrideDestination=True, snifferHttpPorts=[8080],
+                     snifferQuicPorts=[], snifferSkipDomain=["+.lan", "Mijia Cloud"])
+        config = render.load_map(runtime.overlay("", tuned))
+        self.assertEqual(config["sniffer"]["enable"], False)
+        self.assertEqual(config["sniffer"]["override-destination"], True)
+        self.assertEqual(config["sniffer"]["sniff"]["HTTP"], {"ports": [8080]})
+        self.assertNotIn("QUIC", config["sniffer"]["sniff"])
+        self.assertEqual(config["sniffer"]["skip-domain"], ["+.lan", "Mijia Cloud"])
+        # A partial override keeps its own fields; the rest still get FII defaults.
+        config = render.load_map(runtime.overlay("sniffer: {enable: false, sniff: {TLS: {ports: [8443]}}}\n", settings))
+        self.assertEqual(config["sniffer"]["enable"], False)
+        self.assertEqual(config["sniffer"]["force-dns-mapping"], True)
+        self.assertEqual(config["sniffer"]["sniff"]["TLS"], {"ports": [8443]})
+        self.assertEqual(config["sniffer"]["sniff"]["HTTP"], {"ports": [80, 8080, 8880]})
+        self.assertEqual(config["sniffer"]["skip-domain"], ["+.lan", "+.local", "+.home.arpa", "Mijia Cloud"])
+
+    def test_tun_defaults_seed_runtime_and_overrides_win(self):
+        settings = model.defaults()["settings"]
+        config = render.load_map(runtime.overlay("", settings))
+        self.assertEqual(config["tun"]["stack"], "mixed")
+        self.assertEqual(config["tun"]["mtu"], 1500)
+        self.assertFalse(config["tun"]["gso"])
+        self.assertEqual(config["tun"]["gso-max-size"], 65536)
+        self.assertFalse(config["tun"]["endpoint-independent-nat"])
+        # Router-owned fields stay forced regardless of settings or overrides.
+        self.assertFalse(config["tun"]["enable"])
+        self.assertEqual(config["tun"]["device"], "fii-tun")
+        self.assertEqual(config["tun"]["dns-hijack"], [])
+        tuned = dict(settings, coreTunStack="gvisor", coreTunMtu=9000, tunGso=True,
+                     tunGsoMaxSize=32768, tunEndpointIndependentNat=True)
+        config = render.load_map(runtime.overlay("", tuned))
+        self.assertEqual(config["tun"]["stack"], "gvisor")
+        self.assertEqual(config["tun"]["mtu"], 9000)
+        self.assertTrue(config["tun"]["gso"])
+        self.assertEqual(config["tun"]["gso-max-size"], 32768)
+        self.assertTrue(config["tun"]["endpoint-independent-nat"])
+        # Explicit overrides win per field; the remaining fields get FII defaults.
+        config = render.load_map(runtime.overlay("tun: {stack: system, mtu: 1420}\n", settings))
+        self.assertEqual(config["tun"]["stack"], "system")
+        self.assertEqual(config["tun"]["mtu"], 1420)
+        self.assertFalse(config["tun"]["gso"])
+        self.assertEqual(config["tun"]["gso-max-size"], 65536)
+        # Router-owned fields ignore override attempts.
+        config = render.load_map(
+            runtime.overlay("tun: {enable: true, device: evil, auto-route: true, dns-hijack: ['any:53']}\n", settings))
+        self.assertFalse(config["tun"]["enable"])
+        self.assertEqual(config["tun"]["device"], "fii-tun")
+        self.assertFalse(config["tun"]["auto-route"])
+        self.assertEqual(config["tun"]["dns-hijack"], [])
 
     def test_controller_secret_has_no_minimum_length(self):
         for value in ("", "short", "1234"):

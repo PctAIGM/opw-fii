@@ -22,6 +22,18 @@ def defaults():
             "dnsPort": 1053, "controllerPort": 9090,
             "controllerAddress": "127.0.0.1", "mixedAddress": "127.0.0.1",
             "secret": secrets.token_urlsafe(24), "userAgent": "clash.meta",
+            "externalUi": "", "externalUiName": "", "externalUiUrl": "",
+            "coreMode": "rule", "logLevel": "info", "findProcessMode": "off", "coreIpv6": False,
+            "unifiedDelay": False, "tcpConcurrent": False,
+            "keepAliveInterval": 15, "keepAliveIdle": 15,
+            "geodataMode": False, "geoAutoUpdate": True, "geoUpdateInterval": 24,
+            "geoxUrls": {}, "etagSupport": True,
+            "snifferEnable": True, "snifferForceDnsMapping": True, "snifferParsePureIp": True,
+            "snifferOverrideDestination": False,
+            "snifferHttpPorts": [80, 8080, 8880], "snifferTlsPorts": [443, 8443], "snifferQuicPorts": [443, 8443],
+            "snifferSkipDomain": ["+.lan", "+.local", "+.home.arpa", "Mijia Cloud"],
+            "coreTunStack": "mixed", "coreTunMtu": 1500,
+            "tunGso": False, "tunGsoMaxSize": 65536, "tunEndpointIndependentNat": False,
             "bypass": [],
             "lanProxy": True, "routerProxy": False, "udpProxy": True,
             "routerDnsHijack": True, "dnsIpv6Hijack": True,
@@ -161,7 +173,15 @@ def validate(data):
     validate_proxy(settings)
     for key in ("lanProxy", "routerProxy", "udpProxy", "routerDnsHijack", "dnsIpv6Hijack", "lanAccessMode",
                 "lanAccess", "routerBypassUsers", "bootDelay", "scheduledRestart", "restartTime",
-                "goMaxProcs", "goMemLimit", "disableQuicGso", "disableQuicEcn", "skipCoreIpv6Check"):
+                "goMaxProcs", "goMemLimit", "disableQuicGso", "disableQuicEcn", "skipCoreIpv6Check",
+                "coreMode", "logLevel", "findProcessMode", "coreIpv6", "unifiedDelay", "tcpConcurrent",
+                "keepAliveInterval", "keepAliveIdle", "geodataMode", "geoAutoUpdate",
+                "geoUpdateInterval", "geoxUrls", "etagSupport",
+                "snifferEnable", "snifferForceDnsMapping", "snifferParsePureIp",
+                "snifferOverrideDestination", "snifferHttpPorts", "snifferTlsPorts",
+                "snifferQuicPorts", "snifferSkipDomain",
+                "coreTunStack", "coreTunMtu", "tunGso", "tunGsoMaxSize", "tunEndpointIndependentNat",
+                "externalUi", "externalUiName", "externalUiUrl"):
         if key not in settings:
             settings[key] = setting_defaults[key]
     settings.setdefault("controllerAddress", setting_defaults["controllerAddress"])
@@ -171,7 +191,10 @@ def validate(data):
     validate_sites(settings['urlTestSites'])
     for key in ("autostart", "autoApply", "ipv6", "dnsHijack", "lanProxy", "routerProxy", "udpProxy",
                 "routerDnsHijack", "dnsIpv6Hijack", "scheduledRestart", "disableQuicGso",
-                "disableQuicEcn", "skipCoreIpv6Check"):
+                "disableQuicEcn", "skipCoreIpv6Check", "unifiedDelay", "tcpConcurrent",
+                "geodataMode", "geoAutoUpdate", "etagSupport", "coreIpv6",
+                "snifferEnable", "snifferForceDnsMapping", "snifferParsePureIp",
+                "snifferOverrideDestination", "tunGso", "tunEndpointIndependentNat"):
         check(type(settings.get(key)) is bool, key + "必须是布尔值")
     check(type(settings["bootDelay"]) is int and 0 <= settings["bootDelay"] <= 600,
           "开机延迟必须是 0–600 秒")
@@ -181,6 +204,54 @@ def validate(data):
     check(type(settings["goMemLimit"]) is int and 0 <= settings["goMemLimit"] <= 65536,
           "内核内存上限必须是 0–65536 MiB（0 表示不限制）")
     check(settings.get("mode") in ("tproxy", "redirect", "core"), "透明代理模式无效")
+    check(settings.get("coreMode") in ("rule", "global", "direct"), "内核运行模式无效")
+    check(settings.get("logLevel") in ("silent", "error", "warning", "info", "debug"), "日志等级无效")
+    check(settings.get("findProcessMode") in ("strict", "always", "off"), "进程匹配模式无效")
+    check(settings.get("coreTunStack") in ("mixed", "system", "gvisor"), "TUN 协议栈无效")
+    check(type(settings["coreTunMtu"]) is int and 1280 <= settings["coreTunMtu"] <= 9000,
+          "TUN MTU 必须是 1280–9000")
+    check(type(settings["tunGsoMaxSize"]) is int and 1 <= settings["tunGsoMaxSize"] <= 1048576,
+          "TUN GSO 最大长度必须是 1–1048576")
+    check(type(settings["keepAliveInterval"]) is int and 1 <= settings["keepAliveInterval"] <= 3600,
+          "Keep-Alive 间隔必须是 1–3600 秒")
+    check(type(settings["keepAliveIdle"]) is int and 1 <= settings["keepAliveIdle"] <= 3600,
+          "Keep-Alive 空闲时间必须是 1–3600 秒")
+    check(type(settings["geoUpdateInterval"]) is int and 1 <= settings["geoUpdateInterval"] <= 720,
+          "GEO 更新间隔必须是 1–720 小时")
+    geox = settings.get("geoxUrls")
+    check(isinstance(geox, dict) and len(geox) <= 4, "GEO 下载地址无效")
+    for key, value in geox.items():
+        check(key in ("geoip", "geosite", "mmdb", "asn"), "GEO 下载地址类型无效: " + str(key))
+        text(value, "GEO 下载地址", 2048)
+        if value.strip():
+            url(value)
+    # Empty entries mean "use the built-in address"; dropping them keeps the
+    # running config free of blank URLs that the core would reject.
+    settings["geoxUrls"] = {k: v for k, v in geox.items() if v.strip()}
+    external_ui = settings.get("externalUi")
+    check(isinstance(external_ui, str), "外部用户界面目录必须是文本")
+    if external_ui:
+        check(bool(re.fullmatch(r"[A-Za-z0-9_./-]{1,256}", external_ui)), "外部用户界面目录必须是相对内核工作目录的路径")
+        check(not external_ui.startswith("/"), "外部用户界面目录不能是绝对路径")
+        check(".." not in external_ui.split("/"), "外部用户界面目录不能包含 ..")
+    external_ui_name = settings.get("externalUiName")
+    check(isinstance(external_ui_name, str), "外部用户界面名称必须是文本")
+    if external_ui_name:
+        check(bool(re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", external_ui_name)), "外部用户界面名称无效")
+        check(external_ui_name not in (".", ".."), "外部用户界面名称无效")
+    external_ui_url = settings.get("externalUiUrl")
+    if external_ui_url:
+        url(external_ui_url)
+        check(bool(external_ui), "使用外部用户界面下载地址前，请先填写外部用户界面目录")
+    check(not external_ui_name or bool(external_ui), "使用外部用户界面名称前，请先填写外部用户界面目录")
+    for key in ("snifferHttpPorts", "snifferTlsPorts", "snifferQuicPorts"):
+        ports = settings[key]
+        check(isinstance(ports, list) and len(ports) <= 32, "嗅探端口列表无效")
+        check(all(type(p) is int and 1 <= p <= 65535 for p in ports), "嗅探端口必须是 1–65535 的数字")
+    skip = settings["snifferSkipDomain"]
+    check(isinstance(skip, list) and len(skip) <= 64, "嗅探跳过域名列表无效")
+    for entry in skip:
+        check(isinstance(entry, str) and 0 < len(entry) <= 256, "嗅探跳过域名无效")
     ports = [settings.get(k) for k in ("mixedPort", "redirPort", "tproxyPort", "dnsPort", "controllerPort")]
     check(all(type(p) is int and 1024 <= p <= 65535 for p in ports), "端口必须为 1024–65535")
     check(len(set(ports)) == len(ports), "端口不能重复")

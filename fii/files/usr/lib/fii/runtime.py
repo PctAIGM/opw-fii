@@ -60,8 +60,7 @@ def overlay(body, settings, warnings=None):
     seed(root, final=True)
     # These are owned by the router integration. User overrides cannot desynchronise routing.
     for key in ("port", "socks-port", "external-controller-tls", "external-controller-unix",
-                "external-controller-pipe", "external-ui", "external-ui-url", "external-ui-name",
-                "authentication", "lan-allowed-ips", "lan-disallowed-ips"):
+                "external-controller-pipe", "authentication", "lan-allowed-ips", "lan-disallowed-ips"):
         root.pop(key, None)
     def prefer(key, value):
         # Router settings act as defaults; an explicit override value always wins.
@@ -81,8 +80,60 @@ def overlay(body, settings, warnings=None):
     prefer("tproxy-port", settings["tproxyPort"] if "tproxy" in protocols.values() else 0)
     prefer("external-controller", controller_listen(settings))
     prefer("secret", settings["secret"])
+    # External dashboard files live under the core working directory; only
+    # filled-in fields are written and explicit override values still win.
+    if settings["externalUi"]:
+        prefer("external-ui", settings["externalUi"])
+        if settings["externalUiName"]:
+            prefer("external-ui-name", settings["externalUiName"])
+        if settings["externalUiUrl"]:
+            prefer("external-ui-url", settings["externalUiUrl"])
+    # General Mihomo options from the wiki's general page; like the ports above,
+    # they act as defaults and any explicit override value wins.
+    for key, value in (("mode", settings["coreMode"]), ("log-level", settings["logLevel"]),
+                       ("find-process-mode", settings["findProcessMode"]),
+                       ("ipv6", settings["coreIpv6"]),
+                       ("unified-delay", settings["unifiedDelay"]),
+                       ("tcp-concurrent", settings["tcpConcurrent"]),
+                       ("keep-alive-interval", settings["keepAliveInterval"]),
+                       ("keep-alive-idle", settings["keepAliveIdle"]),
+                       ("geodata-mode", settings["geodataMode"]),
+                       ("geo-auto-update", settings["geoAutoUpdate"]),
+                       ("geo-update-interval", settings["geoUpdateInterval"]),
+                       ("etag-support", settings["etagSupport"])):
+        prefer(key, value)
+    # Only user-supplied GEO addresses are written; the core fills its own
+    # built-in URLs for the remaining kinds.
+    geox = {k: v for k, v in (settings.get("geoxUrls") or {}).items() if v}
+    if geox:
+        prefer("geox-url", geox)
+    # Sniffer defaults are seeded per field: a partial override keeps its values
+    # while the remaining fields still get the FII defaults.
+    sniffer = root.setdefault("sniffer", {})
+    check(isinstance(sniffer, dict), "sniffer 覆写必须是对象")
+    for key, value in (("enable", settings["snifferEnable"]),
+                       ("force-dns-mapping", settings["snifferForceDnsMapping"]),
+                       ("parse-pure-ip", settings["snifferParsePureIp"]),
+                       ("override-destination", settings["snifferOverrideDestination"]),
+                       ("skip-domain", list(settings["snifferSkipDomain"]))):
+        sniffer.setdefault(key, copy.deepcopy(value))
+    sniff = sniffer.setdefault("sniff", {})
+    check(isinstance(sniff, dict), "sniffer.sniff 覆写必须是对象")
+    for proto, ports in (("HTTP", settings["snifferHttpPorts"]), ("TLS", settings["snifferTlsPorts"]),
+                         ("QUIC", settings["snifferQuicPorts"])):
+        if not ports:
+            continue
+        entry = sniff.setdefault(proto, {})
+        check(isinstance(entry, dict), "sniffer.sniff.%s 覆写必须是对象" % proto)
+        entry.setdefault("ports", list(ports))
     tun_options = root.setdefault("tun", {})
     check(isinstance(tun_options, dict), "tun 覆写必须是对象")
+    # Tun tuning fields follow the same defaults model: an explicit override
+    # wins, otherwise the router settings seed the value.
+    for key, value in (("stack", settings["coreTunStack"]), ("mtu", settings["coreTunMtu"]),
+                       ("gso", settings["tunGso"]), ("gso-max-size", settings["tunGsoMaxSize"]),
+                       ("endpoint-independent-nat", settings["tunEndpointIndependentNat"])):
+        tun_options.setdefault(key, copy.deepcopy(value))
     tun_options.update({"enable": tun, "device": "fii-tun", "auto-route": False, "auto-redirect": False,
                         "auto-detect-interface": False, "dns-hijack": [],
                         "inet6-address": ["fdfe:dcba:9876::1/126"] if settings["ipv6"] else []})

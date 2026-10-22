@@ -7,7 +7,7 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Content version is synchronized by tools/build_ipk.py, including same-version rebuilds.
-var fiiStyleHash = 'b98db232ddff02a0';
+var fiiStyleHash = 'b5be8c22586dfe62';
 var fiiStylePromise = null;
 function loadStyle() {
     var href = L.resource('fii/style.css') + '?v=' + fiiStyleHash;
@@ -241,7 +241,18 @@ function field(label, value, options) {
         control = E('input', Object.assign(attrs, { type: options.type || 'text', value: value == null ? '' : value,
             min: options.min, max: options.max, autocomplete: 'off', spellcheck: 'false' }));
     }
-    return { node: E('div', { 'class': 'fii-field' }, [E('label', { 'for': ident }, label), control,
+    var body = control;
+    if ((options.type || '') === 'password') {
+        var reveal = E('button', { type: 'button', 'class': 'cbi-button cbi-button-neutral', 'aria-pressed': 'false',
+            click: function() {
+                var hidden = control.type === 'password';
+                control.type = hidden ? 'text' : 'password';
+                reveal.textContent = hidden ? '隐藏' : '显示';
+                reveal.setAttribute('aria-pressed', hidden ? 'true' : 'false');
+            } }, '显示');
+        body = E('div', { 'class': 'fii-input-row' }, [control, reveal]);
+    }
+    return { node: E('div', { 'class': 'fii-field' }, [E('label', { 'for': ident }, label), body,
         options.help ? E('small', {}, options.help) : '']),
         read: function() { return options.type === 'number' ? Number(control.value) : control.value; }, control: control };
 }
@@ -1115,18 +1126,81 @@ return view.extend({
     mihomoPage: function() {
         var self = this, s = this.data.settings;
         var ports = {};
-        [['mixedPort', '混合代理端口'], ['redirPort', 'REDIRECT 端口'], ['tproxyPort', 'TPROXY 端口'], ['dnsPort', 'DNS 端口'], ['controllerPort', '控制器端口']].forEach(function(pair) {
+        [['mixedPort', '混合代理端口'], ['redirPort', 'REDIRECT 端口'], ['tproxyPort', 'TPROXY 端口'], ['dnsPort', 'DNS 端口']].forEach(function(pair) {
             ports[pair[0]] = field(pair[1], s[pair[0]], { type: 'number', min: 1024, max: 65535, required: true });
         });
         var currentAddress = s.controllerAddress || '127.0.0.1';
         var mixedAddress = field('混合代理监听地址', s.mixedAddress || '127.0.0.1', {
             placeholder:'127.0.0.1', help:'填写 IPv4 / IPv6 地址。127.0.0.1 仅供本机使用；局域网访问可填写路由器的 LAN 地址。自定义 listeners 在覆写中配置。' });
+        var controllerPort = field('控制器端口', s.controllerPort, { type: 'number', min: 1024, max: 65535, required: true });
         var addressOptions = currentAddress !== '127.0.0.1' && currentAddress !== '0.0.0.0'
             ? [[currentAddress, currentAddress + ' · 自定义']] : [];
         var controllerAddress = field('控制器监听地址', currentAddress, { select: addressOptions.concat([
             ['127.0.0.1', '仅本机（默认）'], ['0.0.0.0', '所有 IPv4 接口 · 局域网面板可达']]),
             help: '面板等工具通过 路由器IP:控制器端口 访问 Mihomo，需携带控制器密钥。' });
         var secret = field('控制器密钥', s.secret, { type: 'password', help: '留空表示控制器不启用认证。监听局域网时建议设置强密钥。' });
+        var controllerFields = {
+            externalUi: field('外部用户界面', s.externalUi || '', { placeholder: 'ui',
+                help: '相对内核工作目录的面板目录，如 ui；配置后经 控制器地址:端口/ui 访问。' }),
+            externalUiName: field('自定义外部用户界面名字', s.externalUiName || '', { placeholder: 'metacubexd',
+                help: '面板压缩包解出的子目录名，留空使用外部用户界面目录本身。' }),
+            externalUiUrl: field('自定义外部用户界面下载地址', s.externalUiUrl || '', { type: 'url',
+                placeholder: 'https://example.com/dashboard.zip',
+                help: '首次启动时由内核下载并解压到外部用户界面目录，留空不下载。' })
+        };
+        var generalFields = {
+            coreMode: field('运行模式', s.coreMode || 'rule', { select: [
+                ['rule', 'Rule 规则（默认）'], ['global', 'Global 全局代理'], ['direct', 'Direct 全局直连']],
+                help: '排障时可临时切到全局直连；常规使用保持规则模式。' }),
+            logLevel: field('日志等级', s.logLevel || 'info', { select: [
+                ['silent', 'silent 静默'], ['error', 'error 错误'], ['warning', 'warning 警告'],
+                ['info', 'info 常规（默认）'], ['debug', 'debug 调试']],
+                help: '仅在控制台和控制页面输出；debug 日志量大，排障后请调回。' }),
+            findProcessMode: field('进程匹配', s.findProcessMode || 'off', { select: [
+                ['off', 'off 关闭（默认 · 官方路由器建议）'], ['strict', 'strict 自动判断'], ['always', 'always 强制匹配']],
+                help: '路由器转发的局域网流量没有本地进程可匹配，默认关闭；使用 PROCESS 类规则时再打开。' }),
+            keepAliveInterval: field('Keep-Alive 间隔（秒）', s.keepAliveInterval == null ? 15 : s.keepAliveInterval,
+                { type: 'number', min: 1, max: 3600, required: true, help: 'TCP 保活探测的发送间隔。' }),
+            keepAliveIdle: field('Keep-Alive 空闲（秒）', s.keepAliveIdle == null ? 15 : s.keepAliveIdle,
+                { type: 'number', min: 1, max: 3600, required: true, help: '连接的最大空闲时间，超时后发送保活探测。' }),
+            unifiedDelay: toggle('统一延迟', !!s.unifiedDelay, '按 RTT 计算延迟，消除握手差异，测速展示更一致。'),
+            tcpConcurrent: toggle('TCP 并发连接', !!s.tcpConcurrent, '同时连接解析出的全部 IP，采用最先成功的连接。'),
+            coreIpv6: toggle('IPv6 流量', !!s.coreIpv6, '允许内核接受 IPv6 流量（官方默认开启，此处默认关闭）；路由器的 IPv6 流量接管在路由器设置中单独开启。'),
+            etagSupport: toggle('ETag 支持', s.etagSupport !== false, '外部资源未变化时跳过重新下载，减少流量消耗。')
+        };
+        var geox = s.geoxUrls || {};
+        var geoFields = {
+            geoAutoUpdate: toggle('GEO 数据自动更新', s.geoAutoUpdate !== false, '由内核按更新间隔自动更新 GEO 数据；手动更新在控制面板。'),
+            geoUpdateInterval: field('GEO 更新间隔（小时）', s.geoUpdateInterval == null ? 24 : s.geoUpdateInterval,
+                { type: 'number', min: 1, max: 720, required: true }),
+            geodataMode: toggle('GEOIP 使用 dat 格式', !!s.geodataMode, '开启后 GEOIP 使用 geoip.dat，关闭使用默认 metadb；规则中的 GEOSITE 不受影响。'),
+            geoipUrl: field('GeoIP 下载地址', geox.geoip || '', { type: 'url', placeholder: '留空使用官方地址' }),
+            geositeUrl: field('GeoSite 下载地址', geox.geosite || '', { type: 'url', placeholder: '留空使用官方地址' }),
+            mmdbUrl: field('MMDB 下载地址', geox.mmdb || '', { type: 'url', placeholder: '留空使用官方地址', help: 'GEOIP 关闭 dat 格式时使用。' }),
+            asnUrl: field('ASN 数据库下载地址', geox.asn || '', { type: 'url', placeholder: '留空使用官方地址' })
+        };
+        var snifferFields = {
+            enable: toggle('启用嗅探', s.snifferEnable !== false, '嗅探连接的协议域名（SNI / Host），供域名规则分流使用。'),
+            forceDnsMapping: toggle('强制嗅探 DNS 映射', s.snifferForceDnsMapping !== false, '对已由 DNS 映射出域名的流量也进行嗅探。'),
+            parsePureIp: toggle('嗅探纯 IP 连接', s.snifferParsePureIp !== false, '对没有域名映射的纯 IP 连接进行嗅探。'),
+            overrideDestination: toggle('覆盖目标地址', !!s.snifferOverrideDestination, '用嗅探结果改写连接目标地址，可能影响直连流量，默认关闭。'),
+            httpPorts: entries('HTTP 端口', (s.snifferHttpPorts || [80, 8080, 8880]).map(String), '80'),
+            tlsPorts: entries('TLS 端口', (s.snifferTlsPorts || [443, 8443]).map(String), '443'),
+            quicPorts: entries('QUIC 端口', (s.snifferQuicPorts || [443, 8443]).map(String), '443'),
+            skipDomain: entries('跳过域名', s.snifferSkipDomain || ['+.lan', '+.local', '+.home.arpa', 'Mijia Cloud'], '+.push.apple.com')
+        };
+        var tunFields = {
+            stack: field('TUN 协议栈', s.coreTunStack || 'mixed', { select: [
+                ['mixed', 'Mixed 混合（默认）'], ['system', 'System 系统栈'], ['gvisor', 'gVisor 用户栈']],
+                help: 'TCP 走系统栈、UDP 走 gVisor 的混合实现；遇到兼容问题可切换 System 或 gVisor。' }),
+            mtu: field('MTU', s.coreTunMtu == null ? 1500 : s.coreTunMtu,
+                { type: 'number', min: 1280, max: 9000, required: true, help: '最大传输单元，影响极限速率，一般保持默认。' }),
+            gso: toggle('GSO 通用分段卸载', !!s.tunGso, 'Linux 下的通用分段卸载，可提升 TUN 吞吐；需要网卡驱动支持。'),
+            gsoMaxSize: field('GSO 最大长度', s.tunGsoMaxSize == null ? 65536 : s.tunGsoMaxSize,
+                { type: 'number', min: 1, max: 1048576, required: true, help: 'GSO 数据块的最大长度，默认 65536。' }),
+            endpointIndependentNat: toggle('端点无关 NAT', !!s.tunEndpointIndependentNat,
+                '提升 NAT 类型兼容性（P2P 联机等），性能略降，不需要时保持关闭。')
+        };
         var form = E('form', { 'class': 'fii-settings', submit: function(event) { event.preventDefault(); } });
         var canApply = !!this.status.activeOutputId && this.status.coreInstalled;
         async function saveDefaults(apply) {
@@ -1134,6 +1208,40 @@ return view.extend({
             if (invalid) { invalid.reportValidity(); return; }
             var settings = { controllerAddress: controllerAddress.read(), mixedAddress: mixedAddress.read(), secret: secret.read() };
             Object.keys(ports).forEach(function(k) { settings[k] = ports[k].read(); });
+            settings.controllerPort = controllerPort.read();
+            settings.externalUi = controllerFields.externalUi.read().trim();
+            settings.externalUiName = controllerFields.externalUiName.read().trim();
+            settings.externalUiUrl = controllerFields.externalUiUrl.read().trim();
+            Object.keys(generalFields).forEach(function(k) { settings[k] = generalFields[k].read(); });
+            settings.geoAutoUpdate = geoFields.geoAutoUpdate.read();
+            settings.geoUpdateInterval = geoFields.geoUpdateInterval.read();
+            settings.geodataMode = geoFields.geodataMode.read();
+            var urls = {};
+            [['geoip', geoFields.geoipUrl], ['geosite', geoFields.geositeUrl], ['mmdb', geoFields.mmdbUrl], ['asn', geoFields.asnUrl]].forEach(function(pair) {
+                var value = pair[1].read().trim();
+                if (value) urls[pair[0]] = value;
+            });
+            settings.geoxUrls = urls;
+            settings.snifferEnable = snifferFields.enable.read();
+            settings.snifferForceDnsMapping = snifferFields.forceDnsMapping.read();
+            settings.snifferParsePureIp = snifferFields.parsePureIp.read();
+            settings.snifferOverrideDestination = snifferFields.overrideDestination.read();
+            var badPort = '';
+            [['snifferHttpPorts', snifferFields.httpPorts], ['snifferTlsPorts', snifferFields.tlsPorts],
+             ['snifferQuicPorts', snifferFields.quicPorts]].forEach(function(pair) {
+                var values = pair[1].read();
+                if (!badPort) for (var i = 0; i < values.length; i++) {
+                    if (!/^\d+$/.test(values[i])) { badPort = values[i]; break; }
+                }
+                settings[pair[0]] = values.map(Number);
+            });
+            if (badPort) { notify('嗅探端口必须为数字：' + badPort, true); return; }
+            settings.snifferSkipDomain = snifferFields.skipDomain.read();
+            settings.coreTunStack = tunFields.stack.read();
+            settings.coreTunMtu = tunFields.mtu.read();
+            settings.tunGso = tunFields.gso.read();
+            settings.tunGsoMaxSize = tunFields.gsoMaxSize.read();
+            settings.tunEndpointIndependentNat = tunFields.endpointIndependentNat.read();
             var changed = {};
             Object.keys(settings).forEach(function(key) {
                 if (JSON.stringify(settings[key]) !== JSON.stringify(self.data.settings[key])) changed[key] = settings[key];
@@ -1153,89 +1261,66 @@ return view.extend({
         var saveActions = actions([button('保存默认值', function() { return saveDefaults(false); }),
             button('保存并更新配置', function() { return saveDefaults(true); }, true, { disabled: !canApply })]);
         saveActions.classList.add('fii-settings-save');
-        form.appendChild(E('section', { 'class': 'fii-card' }, [E('h3', {}, '连接与端口（默认值）'),
-            E('p', { 'class': 'fii-muted' }, '这些数值在生成运行配置时作为默认值写入；覆写中显式配置的字段优先于此处，实际生效值可在输出预览中查看。'),
-            E('div', { 'class': 'fii-settings-grid fii-port-grid' }, Object.keys(ports).map(function(k) { return ports[k].node; }).concat(mixedAddress.node, controllerAddress.node)),
-            secret.node, saveActions, !canApply ? E('p', { 'class': 'fii-muted' }, '首次使用请先在输出页生成一份运行配置。') : '']));
-        return E('div', {}, [this.corePanel(), this.mihomoBasics(), form,
-            E('p', { 'class': 'fii-muted' }, 'Mihomo 的 DNS、规则、代理组和通用参数始终在覆写中配置；这里只提供内核与接入默认值。')]);
-    },
-
-    mihomoBasics: function() {
-        var self = this;
-        var override = (this.data.overrides || []).find(function(item) { return item.origin === 'legacy-mihomo-settings'; });
-        if (!override) return '';
-        var host = E('div');
-        function card(content) {
-            return E('section', { 'class': 'fii-card' }, [E('div', { 'class': 'fii-card-heading' }, [
-                E('h3', {}, 'Mihomo 基础配置'), actions([badge('全局 · 最低优先级', 'success')])]),
-                E('p', { 'class': 'fii-muted' }, '由旧版设置迁移而来，作为全局覆写先于其他覆写执行。')].concat(content));
+        var generalCards = E('div', {}, [
+            E('section', { 'class': 'fii-card' }, [E('h3', {}, '通用参数（默认值）'),
+                E('p', { 'class': 'fii-muted' }, '运行模式、日志与连接的通用默认值，与连接端口同样由 FII 写入运行配置；覆写中显式配置的字段优先。'),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [generalFields.coreMode.node, generalFields.logLevel.node,
+                    generalFields.findProcessMode.node, generalFields.keepAliveInterval.node, generalFields.keepAliveIdle.node]),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [generalFields.unifiedDelay.node, generalFields.tcpConcurrent.node,
+                    generalFields.coreIpv6.node, generalFields.etagSupport.node]),
+                E('p', { 'class': 'fii-muted' }, '进程匹配关闭后，规则中的 PROCESS 类规则将无法生效。')]),
+            E('section', { 'class': 'fii-card' }, [E('h3', {}, '连接与端口（默认值）'),
+                E('p', { 'class': 'fii-muted' }, '这些数值在生成运行配置时作为默认值写入；覆写中显式配置的字段优先于此处，实际生效值可在输出预览中查看。'),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, Object.keys(ports).map(function(k) { return ports[k].node; }).concat(mixedAddress.node))]),
+            E('section', { 'class': 'fii-card' }, [E('h3', {}, '控制器（默认值）'),
+                E('p', { 'class': 'fii-muted' }, 'API 控制器的端口、监听地址与密钥，以及 zashboard、yacd、metacubexd 等外部面板的下载设置；覆写中显式配置的字段优先。'),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [controllerPort.node, controllerAddress.node, secret.node]),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [controllerFields.externalUi.node, controllerFields.externalUiName.node,
+                    controllerFields.externalUiUrl.node])]),
+            E('section', { 'class': 'fii-card' }, [E('h3', {}, 'GEO 数据（默认值）'),
+                E('p', { 'class': 'fii-muted' }, 'GEOIP / GeoSite / MMDB / ASN 数据的格式、自动更新与下载地址；留空的地址使用官方默认。'),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [geoFields.geoAutoUpdate.node, geoFields.geoUpdateInterval.node,
+                    geoFields.geodataMode.node]),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [geoFields.geoipUrl.node, geoFields.geositeUrl.node,
+                    geoFields.mmdbUrl.node, geoFields.asnUrl.node])])]);
+        var snifferCard = E('section', { 'class': 'fii-card' }, [E('h3', {}, '嗅探（默认值）'),
+            E('p', { 'class': 'fii-muted' }, '嗅探连接的协议域名用于域名规则分流与 DNS 映射；按字段写入运行配置，覆写中显式配置的字段优先。'),
+            E('div', { 'class': 'fii-settings-grid fii-cols3' }, [snifferFields.enable.node, snifferFields.forceDnsMapping.node,
+                snifferFields.parsePureIp.node, snifferFields.overrideDestination.node]),
+            E('div', { 'class': 'fii-settings-grid fii-cols3' }, [snifferFields.httpPorts.node, snifferFields.tlsPorts.node,
+                snifferFields.quicPorts.node]),
+            snifferFields.skipDomain.node]);
+        var tunCard = E('section', { 'class': 'fii-card' }, [E('h3', {}, 'TUN（默认值）'),
+            E('p', { 'class': 'fii-muted' }, '路由器设置中接管方式选择 TUN 时创建的虚拟网卡参数；按字段写入运行配置，覆写中显式配置的字段优先。'),
+            E('div', { 'class': 'fii-settings-grid fii-cols3' }, [tunFields.stack.node, tunFields.mtu.node,
+                tunFields.gso.node, tunFields.gsoMaxSize.node, tunFields.endpointIndependentNat.node]),
+            E('p', { 'class': 'fii-muted' }, '网卡名称、自动路由与 DNS 劫持由 FII 的透明代理接管管理，不在此开放。')]);
+        form.appendChild(generalCards);
+        form.appendChild(snifferCard);
+        form.appendChild(tunCard);
+        form.appendChild(saveActions);
+        if (!canApply) form.appendChild(E('p', { 'class': 'fii-muted' }, '首次使用请先在输出页生成一份运行配置。'));
+        form.appendChild(E('p', { 'class': 'fii-muted' }, 'Mihomo 的 DNS、规则和代理组在覆写中配置；这里提供内核、接入端口、通用参数与嗅探的默认值。'));
+        var corePanel = this.corePanel();
+        var tabs = E('nav', { 'class': 'fii-settings-tabs', 'aria-label': 'Mihomo 页面分类' });
+        var sections = { core: corePanel, general: generalCards, sniffer: snifferCard, tun: tunCard };
+        function showSection(key) {
+            self.mihomoSection = key;
+            sections.core.hidden = key !== 'core';
+            form.hidden = key === 'core';
+            sections.general.hidden = key !== 'general';
+            sections.sniffer.hidden = key !== 'sniffer';
+            sections.tun.hidden = key !== 'tun';
+            Array.from(tabs.children).forEach(function(tab) {
+                tab.classList.toggle('active', tab.dataset.section === key);
+                tab.setAttribute('aria-pressed', String(tab.dataset.section === key));
+            });
         }
-        function render(body) {
-            var policy = null, problem = '';
-            try { policy = JSON.parse(body || '{}'); }
-            catch (err) { problem = err.message; }
-            if (!problem && (!policy || typeof policy !== 'object' || Array.isArray(policy))) problem = '内容不是对象';
-            if (problem) {
-                // An unparsable body stays editable as raw YAML instead of a dead end.
-                var raw = field('覆写内容', body, { area: true, rows: 12, code: true });
-                host.replaceChildren(card([E('p', { 'class': 'fii-notice' }, '内容无法解析为表单（' + problem + '），以 YAML 文本编辑。'),
-                    raw.node, actions([button('保存内容', async function() {
-                        self.basicsBody = null;
-                        await self.save({ kind: 'overrides', id: override.id, fields: { body: raw.read() } });
-                    }, true)])]));
-                return;
-            }
-            var dns = policy.dns && typeof policy.dns === 'object' ? policy.dns : null;
-            var tun = policy.tun && typeof policy.tun === 'object' ? policy.tun : null;
-            var ipv6 = toggle('IPv6 解析', !!policy.ipv6, '同时作用于 DNS 的 IPv6 解析。');
-            var mode = dns && 'enhanced-mode' in dns ? field('DNS 模式', dns['enhanced-mode'], { select: [['fake-ip', 'Fake-IP'], ['redir-host', 'Redir-Host']] }) : null;
-            var nameservers = dns && Array.isArray(dns.nameserver) ? entries('DNS 服务器', dns.nameserver, 'https://dns.alidns.com/dns-query') : null;
-            var bootstrap = dns && Array.isArray(dns['default-nameserver']) ? entries('引导 DNS（IP）', dns['default-nameserver'], '223.5.5.5') : null;
-            var filters = dns && Array.isArray(dns['fake-ip-filter']) ? entries('Fake-IP 过滤', dns['fake-ip-filter'], '+.lan') : null;
-            var proxyDns = dns && Array.isArray(dns['proxy-server-nameserver']) ? entries('代理服务器 DNS', dns['proxy-server-nameserver'], 'https://dns.alidns.com/dns-query') : null;
-            var stack = tun && 'stack' in tun ? field('TUN 协议栈', tun.stack, { select: [['mixed', 'Mixed（默认）'], ['system', 'System'], ['gvisor', 'GVisor']] }) : null;
-            var mtu = tun && typeof tun.mtu === 'number' ? field('TUN MTU', tun.mtu, { type: 'number', min: 1280, max: 9000, required: true }) : null;
-            var grid = [];
-            if (mode) grid.push(mode.node);
-            if (stack) grid.push(stack.node);
-            if (mtu) grid.push(mtu.node);
-            host.replaceChildren(card([ipv6.node,
-                grid.length ? E('div', { 'class': 'fii-settings-grid' }, grid) : '',
-                nameservers ? nameservers.node : '', bootstrap ? bootstrap.node : '',
-                filters ? filters.node : '', proxyDns ? proxyDns.node : '',
-                actions([button('保存基础配置', async function() {
-                    policy.ipv6 = ipv6.read();
-                    if (dns) dns.ipv6 = ipv6.read();
-                    if (mode) dns['enhanced-mode'] = mode.read();
-                    if (nameservers) dns.nameserver = nameservers.read();
-                    if (bootstrap) dns['default-nameserver'] = bootstrap.read();
-                    if (filters) dns['fake-ip-filter'] = filters.read();
-                    if (proxyDns) dns['proxy-server-nameserver'] = proxyDns.read();
-                    if (stack) tun.stack = stack.read();
-                    if (mtu) tun.mtu = parseInt(mtu.read(), 10);
-                    self.basicsBody = null;
-                    await self.save({ kind: 'overrides', id: override.id, fields: { body: JSON.stringify(policy, null, 2) } });
-                }, true)]),
-                E('p', { 'class': 'fii-muted' }, '保存后需在输出页应用才生效；未在此展示的字段请通过普通覆写调整。')]));
-        }
-        if (self.basicsBody != null) {
-            // Cached from the first fetch; redraws render synchronously instead of
-            // coupling every render to another full-content transfer.
-            render(self.basicsBody);
-            return host;
-        }
-        (async function() {
-            // The page snapshot omits bodies; the full migrated content is fetched once.
-            var full = await self.readItem('overrides', override, false, false);
-            self.basicsBody = full && full.body != null ? full.body : '';
-            if (!host.isConnected) return;
-            render(self.basicsBody);
-        })().catch(function(err) {
-            if (!host.isConnected) return;
-            host.replaceChildren(card([E('p', { 'class': 'fii-notice' }, '读取基础配置失败：' + err.message)]));
+        [['core', '内核'], ['general', '全局配置'], ['sniffer', '嗅探'], ['tun', 'TUN']].forEach(function(pair) {
+            tabs.appendChild(button(pair[1], function() { showSection(pair[0]); }, false, { 'class': 'fii-settings-tab', 'data-section': pair[0] }));
         });
-        return host;
+        showSection(self.mihomoSection || 'core');
+        return E('div', {}, [tabs, corePanel, form]);
     },
 
     sourcesPage: function() {
@@ -1343,11 +1428,9 @@ return view.extend({
 
     overridesPage: function() {
         var self = this, all = this.data.overrides;
-        // The migrated Mihomo basics live on the Mihomo tab; keep real indexes for ordering.
-        var shown = all.filter(function(item) { return item.origin !== 'legacy-mihomo-settings'; });
         return E('div', {}, [this.pageHeading('覆写', '全局覆写先执行，专属覆写按输出中的选择顺序执行，同一覆写只执行一次。', button('添加覆写', function() { return self.editOverride(); }, true)),
-            E('p', { 'class': 'fii-muted' }, '这里管理 Mihomo 的 DNS、规则、代理组和通用参数。全局覆写先按列表顺序执行，专属覆写在输出中选择和排序。路由器流量接管请到路由器设置。'),
-            shown.length ? E('div', { 'class': 'fii-override-list', 'aria-label': '覆写列表' }, shown.map(function(item) {
+            E('p', { 'class': 'fii-muted' }, '这里管理 Mihomo 的 DNS、规则、代理组和通用参数。全局覆写先按列表顺序执行，专属覆写在输出中选择和排序。旧版迁移的参数也在这里作为全局覆写管理。路由器流量接管请到路由器设置。'),
+            all.length ? E('div', { 'class': 'fii-override-list', 'aria-label': '覆写列表' }, all.map(function(item) {
                 var index = all.indexOf(item);
                 return E('article', { 'class': 'fii-card fii-override-row', 'data-id': item.id }, [E('div', { 'class': 'fii-card-heading' }, [
                     E('div', { 'class': 'fii-order-heading' }, [E('span', { 'class': 'fii-order-number', 'aria-label': '列表第 ' + (index + 1) + ' 项' }, String(index + 1)), E('h3', {}, item.name)]),
@@ -1635,7 +1718,7 @@ return view.extend({
             button('保存并更新配置', function() { return saveSettings(true); }, true, { disabled: !canApply })]);
         saveActions.classList.add('fii-settings-save');
         saveActions.hidden = currentSection === 'backup';
-        var form = E('form', { 'class': 'fii-settings', submit: function(event) { event.preventDefault(); } }, [E('p', { 'class': 'fii-muted' }, '本页只管理路由器接口、流量接管、防火墙与服务。Mihomo 的 DNS、规则、代理组和通用参数在覆写中配置。'), tabs,
+        var form = E('form', { 'class': 'fii-settings', submit: function(event) { event.preventDefault(); } }, [E('p', { 'class': 'fii-muted' }, '本页只管理路由器接口、流量接管、防火墙与服务。Mihomo 的 DNS、规则和代理组在覆写中配置，通用参数默认值在 Mihomo 页面。'), tabs,
             network.error ? E('p', { 'class': 'fii-notice', role: 'alert' }, '读取网络接口失败：' + network.error + '。可重新载入后重试。') : '',
             proxyPanel, lanPanel, accessPanel, routerPanel, bypassPanel, miscPanel, dnsPanel, servicePanel, backups, saveActions,
             !canApply ? E('p', { 'class': 'fii-muted' }, '首次使用请先在输出页生成一份运行配置。') : '']);

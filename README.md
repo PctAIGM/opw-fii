@@ -2,9 +2,11 @@
 
 OpenWrt 上的 Mihomo 配置管理工具，围绕 **订阅源 → 覆写 → 输出配置** 组织日常使用。
 
-面向 OpenWrt 24.10 / x86_64（如 Intel J4125），当前版本 **0.1.1-45**，处于试用阶段。安装包仅包含应用，Mihomo 内核在页面中下载，支持 Release / Alpha 渠道。
+面向 OpenWrt 24.10 / x86_64（如 Intel J4125），当前版本 **0.1.1-47**，处于试用阶段。安装包仅包含应用，Mihomo 内核在页面中下载，支持 Release / Alpha 渠道。
 
 混合代理监听地址可在 **Mihomo → 连接与端口** 设置，默认仅本机。需要局域网访问时填写路由器的 LAN 地址，例如 `192.168.100.1`；额外的 Shadowsocks 等入站可通过覆写中的 `listeners` 配置，生成运行配置时会保留。
+
+**Mihomo → 通用参数 / GEO 数据** 提供运行模式、日志等级、进程匹配、统一延迟、TCP 并发、Keep-Alive，以及 GEO 自动更新、更新间隔和 GeoIP / GeoSite / MMDB / ASN 自定义下载地址等默认值；覆写中显式配置的字段优先于此处。
 
 ## 功能
 
@@ -24,7 +26,7 @@ OpenWrt 上的 Mihomo 配置管理工具，围绕 **订阅源 → 覆写 → 输
 
 ```sh
 opkg update
-opkg install /tmp/fii_0.1.1-45_all.ipk /tmp/luci-app-fii_0.1.1-45_all.ipk
+opkg install /tmp/fii_0.1.1-47_all.ipk /tmp/luci-app-fii_0.1.1-47_all.ipk
 ```
 
 打开 **LuCI → 服务 → FII**：

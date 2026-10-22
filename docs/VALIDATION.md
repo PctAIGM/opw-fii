@@ -549,3 +549,66 @@ The router acceptance result should be added only after actually performing thes
 - Chrome 中验证新增、修改、删除、修改 URL 后清除旧耗时、测试中切换页面及返回后显示结果。实际 iStoreOS Argon 主题验证并修正标题操作区被 h3 宽度挤成两行的问题。手机断点和深色样式已实现，本轮未做实体手机交互验证。
 - 两个应用 IPK 已构建并通过包结构、权限、依赖、JS/CSS 内容哈希检查；实际路由器已安装 **0.1.1-45**，35 个文件内容与权限核验成功。升级前后 state.json、active.json、运行 YAML、内核及 DHCP 文件哈希一致，保存/运行版本均为 69，内核和管理 API 正常。最终升级备份：/etc/fii/backups/package-upgrade-0.1.1-45-20261021-143705。
 - 实际 LuCI 点击“全部测试”返回百度 HTTP 200 / 97 ms，Google HTTP 204 / 139 ms，GitHub HTTP 200 / 219 ms（14:38:56 的单次样本，耗时会随网络变化）。
+
+## 2026-10-22：Mihomo 通用参数默认值（0.1.1-46）
+
+- 参照 wiki.metacubex.one/config/general，Mihomo 页新增「通用参数（默认值）」卡片：运行模式、日志等级、进程匹配、统一延迟、TCP 并发、Keep-Alive 间隔/空闲、GEOIP dat 格式、GEO 自动更新与间隔、ETag 支持，共 11 个 settings 键。默认值与官方一致；进程匹配按官方的路由器建议默认 `off`（唯一有意偏离官方默认的字段）。经 `runtime.overlay()` 的 `prefer()` 注入运行配置，覆写中显式配置的同名字段优先。`render.py` BASE 模板移除了硬编码的 `mode: rule` / `log-level: info`，否则会挡住 settings 默认值。
+- 宿主机 Python 全量 **244 项通过**（新增默认值注入/覆写优先/旧状态回填/8 种非法值拒绝）；`node --check` 验证 app.js 语法。
+- QEMU iStoreOS 24.10.8 VM（Mihomo v1.19.32，既有 revision 207 状态）同步代码后验证：
+  - 旧 state（缺全部 11 键）经 `Store().read()` 内存回填为期望值，磁盘文件未被改写；save 后全部新键随写路径持久化。
+  - `activate("p1")` 端到端成功（内核 `-t` 校验通过），`/tmp/fii/config.yaml` 含全部 11 个字段且 `find-process-mode: off`；启动服务后 `/tmp/fii/ready` 存在、内核运行、透明代理就绪。
+  - 控制器 `/configs` 实时值与配置一致（内核 v1.19.32 接受 `keep-alive-idle`、`etag-support`、`geo-update-interval` 等较新字段）。
+  - 内存构造临时全局覆写（mode/global、log-level/warning、keep-alive-interval/45、unified-delay/true、find-process-mode/always）经真实 render+overlay 链路验证覆写优先，其余字段保持 FII 默认。
+  - `cli.dispatch("save")` 保存 logLevel=debug、geoAutoUpdate=true、tcpConcurrent=true 后重新 apply，服务重启且控制器实时值同步变化；`logLevel=trace` 被校验拒绝；随后还原默认并再次 apply，实时值回到默认（`find-process-mode` 保持 `off`）。
+  - LuCI 实际服务的 app.js（HTTP 200）包含新卡片文案；`ubus call luci.fii status` 报告 running=true、activeOutputId=p1。
+- 本轮 VM 验证采用文件同步而非 IPK 安装；浏览器端三层 JS 缓存未逐层清理，未做实体浏览器点验（新卡片为静态表单，语法与文案已核）。
+
+### 2026-10-22 追加：移除 Mihomo 页动态基础配置卡（0.1.1-46）
+
+- 用户确认 Mihomo 页只保留全局配置默认参数（内核管理 + 连接与端口 + 通用参数），删除按旧版迁移数据动态渲染的「Mihomo 基础配置」卡（`mihomoBasics`）；迁移覆写本身保留并改为在覆写页与普通全局覆写一样管理（原先覆写页按 `origin=legacy-mihomo-settings` 隐藏它，去掉隐藏避免出现"仍生效但无处可见/编辑"的覆写）。后端 `migrate()` 不变，旧状态与旧备份的迁移语义不受影响。
+- Python 244 项通过（纯 UI 改动，无后端变更）；`node --check` 通过；app.js 中 `mihomoBasics`/`basicsBody`/`legacy-mihomo-settings` 引用清零。
+- VM 复验：同步 app.js 并清 modulecache 后，服务的 JS 无基础配置卡代码、含通用参数卡；重新 apply 成功、running=true、transparent ready；apply 前后 `/tmp/fii/config.yaml` 与 active.json 的 YAML md5 均为 `328c817d422e…`，字节级一致，证明生成的运行配置不受影响；state 中迁移覆写仍在（覆写页可见可编辑，正文为 JSON、按 YAML 编辑兼容）。
+
+### 2026-10-22 追加：GEO 数据独立成卡与布局修正（0.1.1-46）
+
+- 按用户反馈：GEO 参数（自动更新、更新间隔、GEOIP dat 格式）从通用参数卡移出，独立「GEO 数据（默认值）」卡并新增 GeoIP / GeoSite / MMDB / ASN 四个自定义下载地址（`geox-url`，留空使用官方地址；仅写入已填写类型，其余由内核补内置地址）。`geoAutoUpdate` 默认改为开启（第二个有意偏离官方默认的字段，第一个是进程匹配默认 off）。修复设置表单复选框与文字的基线错位（`.fii-check input[type=checkbox]{margin:0}`，浏览器默认 margin 导致）。
+- Python 244 项通过（默认值/geox-url 注入与覆写优先/空白地址丢弃/4 组非法值拒绝）；`node --check` 通过。
+- VM 验证：保存 `geoxUrls={geoip:…}` 后 apply，`/tmp/fii/config.yaml` 的 `geox-url` 仅含 geoip 一项、`geo-auto-update: true`，控制器 `/configs` 实时一致；清空后 apply 无 `geox-url` 键。Playwright 实测 LuCI Mihomo 页：通用参数卡（5 字段网格 + 3 开关）、GEO 卡（3 项 + 4 地址框）分组正确，复选框与文字垂直居中，GEO 数据自动更新默认勾选；内核运行正常。
+
+### 2026-10-22 追加：控制器独立成卡与外部用户界面（0.1.1-46）
+
+- 控制器端口、监听地址、密钥从「连接与端口」移入新「控制器（默认值）」卡，并补齐外部用户界面三项（`external-ui` 目录、`external-ui-name` 子目录名、`external-ui-url` 下载地址）。三项从 `runtime.overlay()` 的强制移除列表解除，改为 settings 默认值 `prefer()` 注入（仅写非空项；覆写显式配置优先，覆写中的 external-ui 不再被剥离）。校验：目录为相对内核工作目录的路径（禁绝对路径与 `..`）、名称为单段、下载地址须为 http(s) URL、名称/地址依赖目录先填写。
+- Python 244 项通过（默认不写、填齐写入、覆写优先且不被剥离、6 组非法值拒绝、旧状态回填）。中途发现空字符串未放行导致全量报错，已修复（空=不启用）。
+- VM 验证：保存 `externalUi=ui` 后 apply，`/tmp/fii/config.yaml` 含 `external-ui: ui`（name/url 缺省不写）、服务重启后 running=true；清空后 apply 键消失。Playwright 实测 Mihomo 页四张卡（连接与端口 / 控制器 / 通用参数 / GEO 数据）布局与字段完整；注意 playwright 长会话的浏览器缓存需关掉浏览器重开才会取新 JS（fetch cache:reload + 同页导航不够）。
+
+### 2026-10-22 追加：密钥显隐与三列布局统一（0.1.1-46）
+
+- 控制器密钥收进 3 列网格（与端口/监听地址同行），不再通栏；`field()` 助手为密码框内置「显示/隐藏」切换按钮（`aria-pressed` 跟随，flex 行内布局 `.fii-input-row`）。四张卡的设置网格统一 `fii-cols3`（≥1200px 三列、≤700px 单列，原 `fii-port-grid` 更名），路由器设置页两列布局不变。
+- Python 244 项通过；`node --check` 通过。Playwright 实测：控制器卡两行各三字段、密钥框宽度与其他列一致、显示/隐藏按钮切换与 pressed 状态正确。
+
+### 2026-10-22 追加：通用参数增加 IPv6 流量开关（0.1.1-46）
+
+- 按官方 general 页 `ipv6`（允许内核接受 IPv6 流量）在通用参数卡开关组新增「IPv6 流量」（settings `coreIpv6`，与 FII 透明代理模式的 `settings["mode"]`、路由器 IPv6 接管的 `settings["ipv6"]` 区分）。默认关闭——第三个有意偏离官方默认（官方默认 true），与路由器 IPv6 接管默认关闭的姿态一致，升级零行为变化。实现沿用既有坑位知识：先从 `mihomo.py DEFAULTS` 移除写死的 `ipv6: false`（否则挡死 prefer()），再由 `runtime.overlay()` 注入；覆写显式配置优先，`dns.ipv6`（AAAA 解析）仍归覆写。
+- Python 244 项通过（默认 False、调参 True、覆写 `ipv6: true` 优先、旧状态回填）。VM 验证：无覆写时 coreIpv6=True 生效为 true；VM 旧迁移覆写携带 `ipv6: false` 时保持覆写优先（运行配置 false）；save→apply→还原闭环服务正常。Playwright 实测开关渲染与帮助文案正常。
+
+### 2026-10-22 追加：卡片顺序调整（0.1.1-46）
+
+- 按用户要求把「通用参数（默认值）」移到「Mihomo 内核管理」正下方；页面顺序为 内核管理 → 通用参数 → 连接与端口 → 控制器 → GEO 数据。纯 UI 顺序调整，无后端变化；`node --check` 通过，Playwright 实测顺序正确、四卡各渲染一次。
+
+### 2026-10-22 追加：Mihomo 页二级页签（0.1.1-46）
+
+- Mihomo 页新增二级页签「内核」/「全局配置」，复用路由器设置页的 `fii-settings-tabs`/`showSection` 模式（`self.mihomoSection` 记忆选中态，跨重绘与页签切换保持）。「内核」放内核管理卡片，「全局配置」放通用参数、连接与端口、控制器、GEO 数据四张卡与保存按钮；默认选中「内核」。纯 UI 变化。
+- `node --check` 通过、Python 244 项通过；Playwright 实测：默认内核页签仅显内核卡、切换全局配置显四卡+保存、切概览再返回停留在全局配置。
+
+### 2026-10-22 追加：嗅探二级页签（0.1.1-46）
+
+- Mihomo 页二级页签扩展为 内核 / 全局配置 / 嗅探。「嗅探」卡提供启用、强制嗅探 DNS 映射、嗅探纯 IP、覆盖目标地址四个开关与 HTTP/TLS/QUIC 端口、跳过域名列表（entries 控件），默认值采用用户提供的配置（enable/force-dns-mapping/parse-pure-ip 为 true、override-destination 为 false、HTTP 80/8080/8880、TLS·QUIC 443/8443、skip-domain 含 +.lan/+.local/+.home.arpa/Mijia Cloud）。保存按钮与全局配置共享，一次保存全部默认值；端口在客户端与服务端双重校验为 1–65535 数字。
+- `runtime.overlay()` 按字段级 setdefault 注入 sniffer（含 sniff 各协议）：覆写只改单个字段（如仅关 enable 或仅改 TLS 端口）时其余字段仍取 FII 默认值；skip-domain 允许含空格条目（默认含 "Mijia Cloud"）。空端口列表表示不写入该协议。
+- Python 245 项通过（默认块整体断言、调参、部分覆写字段级优先、6 组非法值拒绝、回填）。VM：apply 后 `/tmp/fii/config.yaml` 的 sniffer 块与用户配置逐字段一致，真实内核 `-t` 校验通过、服务 ready。本轮 playwright 不可用，前端以服务端 JS 内容（含嗅探卡与页签代码）+ 与已验证模式（tabs/toggle/entries/cols3）一致为证，浏览器点验待后续补做。
+
+### 2026-10-22 追加：TUN 二级页签（0.1.1-47）
+
+- Mihomo 页二级页签扩展为 内核 / 全局配置 / 嗅探 / TUN。「TUN」卡按官方 tun 页与用户截图取常用字段：协议栈（mixed/system/gvisor，默认 mixed，与旧迁移覆写口径一致）、MTU（默认 1500，1280–9000）、GSO 与 GSO 最大长度（默认 65536，1–1048576）、端点无关 NAT（默认关闭）。截图中的网卡名称/自动路由/自动出口/DNS 劫持为 FII 接管固定项不开放；严格路由、排除网段依赖 auto-route（FII 固定关闭）故不开放；截图的「ICMP 转发」在 mihomo 无对应字段。
+- 实现第三次踩中 BASE/DEFAULTS 挡位坑：先从 `mihomo.py DEFAULTS` 移除写死的 `tun: {stack, mtu}`，`runtime.overlay()` 再按字段 setdefault 注入（覆写显式配置优先）。settings 键名绕开 LEGACY_KEYS：`coreTunStack`/`coreTunMtu`/`tunGso`/`tunGsoMaxSize`/`tunEndpointIndependentNat`。
+- Python 246 项通过（新增 tun 默认/调参/字段级覆写优先/接管字段无视覆写强制；回填与非法值用例扩展——含 `coreTunStack: mips` 拒绝以锁定三选项口径）。
+- VM 验证：默认 apply 后 tun 块含 5 个新字段默认值；保存 gvisor/1420/gso/32768/EIM-NAT 并把接管方式切到 TUN 后 `enable: true`、fii-tun 设备 UP；VM 携带的旧迁移覆写声明 stack/mtu 时覆写优先（设备 MTU 实际 1500），从覆写中移除 tun 后 settings 生效（stack: gvisor、设备 MTU 实际 1420）；全部恢复基线后服务 READY。注意点：TUN 接管是路由器设置的 TCP/UDP 代理方式选 TUN，`mode: core` 反而不做任何拦截（modes() 返回 off）；VM 上走真实 save 路径需携带当前 `revision`，`python3 -m fii.cli` 需 `PYTHONPATH=/usr/lib`。前端本轮仍无 playwright，以服务端 JS + 既有同构页签模式为证。
