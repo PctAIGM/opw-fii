@@ -147,7 +147,8 @@ class ProxyOptionsTests(unittest.TestCase):
     def test_china_sets_dscp_marks_and_fake_ip_exemptions(self):
         s = model.defaults()["settings"]
         s.update(bypassChina4=True, bypassChina6=True, bypassDscp=["4"], bypassMarks=["0x100/0xff00"], tcpPorts="80 443", fakeIpPing=True)
-        nft = runtime.nftables(s)
+        # Fake-IP ping exemptions only exist in fake-ip mode; the router default is redir-host.
+        nft = runtime.nftables(s, "dns: {enhanced-mode: fake-ip}\n")
         self.assertIn("1.0.1.0/24", nft)
         self.assertIn("ip daddr @china4", nft)
         self.assertIn("ip6 daddr @china6", nft)

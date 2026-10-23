@@ -160,6 +160,11 @@ test('network choices use native asynchronous system queries', function() {
     check(length(result.devices) == 1 && result.devices[0].name == 'br-lan', 'device exclusions');
     check(result.devices[0].networks[0] == 'lan' && result.devices[0].up, 'network mapping');
     check(result.hosts[0].name == 'desktop' && result.users[0].id == '0' && result.groups[1].id == '100', 'host and account parsing');
+    fs.mkdir(root + '/tmp/resolv.conf.d', 0700);
+    write(root + '/tmp/resolv.conf.d/resolv.conf.auto',
+        '# Interface wan\nnameserver 10.0.2.3\nnameserver 127.0.0.1\nnameserver bogus\nnameserver 10.0.2.3\n');
+    let upstream = unwrap(invoke('network')).wanDns;
+    check(type(upstream) == 'array' && length(upstream) == 1 && upstream[0] == '10.0.2.3', 'upstream dns hint');
     check(workers == count, 'network queries do not start Python');
 });
 test('proxy groups preserve active YAML order with an in-memory snapshot cache', function() {

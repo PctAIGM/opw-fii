@@ -6,6 +6,28 @@ from .runtime import run
 from .store import rooted
 
 
+def wan_dns():
+    """Upstream DNS servers this router received (netifd's DHCP/PPPoE copy)."""
+    import ipaddress
+    result = []
+    source = rooted("/tmp/resolv.conf.d/resolv.conf.auto")
+    if source.exists():
+        for line in source.read_text(encoding="utf-8", errors="replace").splitlines()[:64]:
+            parts = line.split()
+            if len(parts) != 2 or parts[0] != "nameserver":
+                continue
+            try:
+                address = ipaddress.ip_address(parts[1])
+            except ValueError:
+                continue
+            if address.is_loopback or address.is_link_local or address.is_multicast or parts[1] in result:
+                continue
+            result.append(parts[1])
+            if len(result) >= 4:
+                break
+    return result
+
+
 def choices():
     def query(args):
         try:
@@ -63,4 +85,4 @@ def choices():
                 pass
     return {"devices": sorted(devices.values(), key=lambda d: (not bool(d["networks"]), d["name"])),
             "hosts": hosts, "users": users, "groups": groups, "cgroups": cgroups,
-            "cgroupV2": (cgroup_root / "cgroup.controllers").exists()}
+            "cgroupV2": (cgroup_root / "cgroup.controllers").exists(), "wanDns": wan_dns()}

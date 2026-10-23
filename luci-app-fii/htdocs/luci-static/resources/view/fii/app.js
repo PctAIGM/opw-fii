@@ -7,7 +7,7 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Content version is synchronized by tools/build_ipk.py, including same-version rebuilds.
-var fiiStyleHash = 'b5be8c22586dfe62';
+var fiiStyleHash = 'e7978b32daaf76ed';
 var fiiStylePromise = null;
 function loadStyle() {
     var href = L.resource('fii/style.css') + '?v=' + fiiStyleHash;
@@ -414,6 +414,54 @@ function entries(label, initial, placeholder, suggestions, formatValue) {
     return { node: E('fieldset', { 'class': 'fii-selection fii-entries' }, [E('legend', {}, label), list,
         pick ? pick.node : '', E('div', { 'class': 'fii-entry-add' }, [draft.node, button('添加', add)])]),
         read: function() { return unique(values.concat(draft.read().trim() ? [draft.read().trim()] : [])); } };
+}
+
+function dnsPolicyEditor(label, initial, help, itemLabel, itemPlaceholder, itemHint) {
+    itemLabel = itemLabel || 'DNS 地址';
+    itemPlaceholder = itemPlaceholder || 'https://dns.alidns.com/dns-query 或 223.5.5.5';
+    itemHint = itemHint || '匹配条件支持 example.com、+.example.com 通配和 geosite:cn 等语法；每个条件至少一个 DNS 地址。';
+    var values = [];
+    Object.keys(initial || {}).forEach(function(domain) {
+        var servers = initial[domain];
+        values.push({ domain: domain, servers: (Array.isArray(servers) ? servers : [servers]).map(String) });
+    });
+    var host = E('div', { 'class': 'fii-acl-list' });
+    function edit(index) {
+        var item = index == null ? { domain: '', servers: [] } : values[index];
+        var domain = field('域名 / 匹配条件', item.domain, { required: true });
+        var servers = entries(itemLabel, item.servers.slice(), itemPlaceholder);
+        var feedback = E('p', { 'class': 'fii-error', role: 'alert' });
+        ui.showModal(index == null ? '添加' + label + '条目' : '编辑' + label + '条目', [domain.node, servers.node, feedback,
+            E('p', { 'class': 'fii-muted' }, itemHint),
+            actions([button('取消', function() { ui.hideModal(); }), button('确定', function() {
+                var next = { domain: domain.read().trim(), servers: servers.read().filter(Boolean) };
+                if (!next.domain || !next.servers.length) { feedback.textContent = '请填写域名和至少一个' + itemLabel + '。'; return; }
+                if (values.some(function(v, i) { return i !== index && v.domain === next.domain; })) { feedback.textContent = '该域名已存在。'; return; }
+                if (index == null) values.push(next); else values[index] = next;
+                draw(); ui.hideModal();
+            }, true)])], 'fii-modal');
+        domain.control.focus();
+    }
+    function draw() {
+        host.replaceChildren.apply(host, values.map(function(item, index) {
+            return E('article', { 'class': 'fii-acl-rule' }, [
+                E('div', { 'class': 'fii-card-heading' }, [E('strong', { title: item.domain }, item.domain)]),
+                E('p', { 'class': 'fii-muted' }, item.servers.join('、')),
+                actions([button('编辑', function() { edit(index); }),
+                    button('上移', function() { var v = values.splice(index, 1)[0]; values.splice(index - 1, 0, v); draw(); }, false, { disabled: index === 0, 'aria-label': '上移 ' + item.domain }),
+                    button('下移', function() { var v = values.splice(index, 1)[0]; values.splice(index + 1, 0, v); draw(); }, false, { disabled: index === values.length - 1, 'aria-label': '下移 ' + item.domain }),
+                    button('删除', function() { values.splice(index, 1); draw(); }, false, { 'aria-label': '删除 ' + item.domain })])]);
+        }));
+        if (!values.length) host.appendChild(E('p', { 'class': 'fii-muted' }, '没有' + label + '条目，域名按默认 DNS 解析。'));
+    }
+    draw();
+    return { node: E('fieldset', { 'class': 'fii-selection' }, [E('legend', {}, label), host, help ? E('small', {}, help) : '',
+        actions([button('添加条目', function() { edit(null); })])]),
+        read: function() {
+            var result = {};
+            values.forEach(function(item) { result[item.domain] = item.servers.slice(); });
+            return result;
+        } };
 }
 
 function legacyAccess(s, scope) {
@@ -1201,6 +1249,40 @@ return view.extend({
             endpointIndependentNat: toggle('端点无关 NAT', !!s.tunEndpointIndependentNat,
                 '提升 NAT 类型兼容性（P2P 联机等），性能略降，不需要时保持关闭。')
         };
+        var dnsFields = {
+            enable: toggle('启用内核 DNS', s.dnsEnable !== false, '路由器设置开启 DNS 接管时必须启用；关闭前请先停止 DNS 接管。'),
+            mode: field('DNS 模式', s.dnsEnhancedMode || 'redir-host', { select: [
+                ['redir-host', 'Redir-Host（默认）'], ['fake-ip', 'Fake-IP']],
+                help: 'Redir-Host 返回真实 IP，兼容性最好；Fake-IP 返回虚拟 IP、由内核映射回域名，省一次解析但需维护过滤列表。切换后需重启服务清空缓存。' }),
+            ipv6: toggle('IPv6 解析（AAAA）', !!s.dnsIpv6, '返回 AAAA 记录；与路由器的 IPv6 流量接管相互独立。'),
+            cacheAlgorithm: field('DNS 缓存算法', s.dnsCacheAlgorithm || 'lru', { select: [
+                ['lru', 'LRU 最近最少使用（默认）'], ['arc', 'ARC 自适应替换缓存']] }),
+            respectRules: toggle('遵循分流规则', !!s.dnsRespectRules, 'DNS 请求按分流规则选择出口；代理节点 DNS 不能为空，留空时自动跟随默认 DNS。'),
+            preferH3: toggle('DoH 优先 HTTP/3', !!s.dnsPreferH3, 'DoH 地址尝试用 HTTP/3 请求，可能更快；部分网络会拦截 UDP/QUIC。'),
+            useSystemHosts: toggle('使用系统 Hosts', s.dnsUseSystemHosts !== false, '解析时读取路由器 /etc/hosts。'),
+            useHosts: toggle('使用静态解析表', !!s.dnsUseHosts, '解析时优先查询下方「静态解析 Hosts」分组的域名 → IP 映射。'),
+            fakeIpRange: field('Fake-IP IPv4 网段', s.dnsFakeIpRange || '198.18.0.1/16', { required: true,
+                help: 'Fake-IP 模式使用的虚拟 IPv4 网段，避开局域网常用网段。' }),
+            fakeIpRange6: field('Fake-IP IPv6 网段', s.dnsFakeIpRange6 || 'fc00::/18', { required: true }),
+            fakeIpFilterMode: field('Fake-IP 过滤模式', s.dnsFakeIpFilterMode || 'blacklist', { select: [
+                ['blacklist', '黑名单（默认）'], ['whitelist', '白名单'], ['rule', '规则模式']],
+                help: '黑名单：列表内域名返回真实 IP；白名单：仅列表内域名用 Fake-IP。' }),
+            fakeIpFilter: entries('Fake-IP 过滤域名', s.dnsFakeIpFilter || ['+.lan', '+.local'], '+.example.com'),
+            nameservers: entries('默认 DNS', s.dnsNameservers || ['https://dns.alidns.com/dns-query', 'https://doh.pub/dns-query'],
+                'https://dns.alidns.com/dns-query 或 223.5.5.5'),
+            defaultNameservers: entries('引导 DNS', s.dnsDefaultNameservers || ['223.5.5.5', '119.29.29.29'], '223.5.5.5'),
+            proxyServerNameservers: entries('代理节点 DNS', s.dnsProxyServerNameservers || [], 'https://dns.alidns.com/dns-query'),
+            directNameservers: entries('直连 DNS', s.dnsDirectNameservers || [], 'https://dns.alidns.com/dns-query'),
+            fallback: entries('Fallback DNS', s.dnsFallback || [], '8.8.8.8')
+        };
+        var dnsPolicy = dnsPolicyEditor('DNS 分流策略', s.dnsNameserverPolicy || {},
+            '把指定域名交给特定 DNS 解析（如 +.cn、geosite:cn 走国内 DNS），优先级高于默认 DNS；常用于国内外分流。');
+        var dnsProxyPolicy = dnsPolicyEditor('代理节点 DNS 策略', s.dnsProxyServerNameserverPolicy || {},
+            '与上方分流策略同理，但只作用于「代理节点服务器」域名的解析（proxy-server-nameserver-policy）。');
+        var dnsHostsEditor = dnsPolicyEditor('静态解析 Hosts', s.dnsHosts || {},
+            '把域名写死为指定 IP（mihomo 顶层 hosts 表），需开启「使用静态解析表」才参与解析；支持通配域名与 geosite: 匹配。',
+            'IP 地址', '127.0.0.1 或 fd00::1',
+            '匹配条件支持 example.com、*.example.com 通配和 geosite:internal 等语法；每个域名至少一个 IP 地址。');
         var form = E('form', { 'class': 'fii-settings', submit: function(event) { event.preventDefault(); } });
         var canApply = !!this.status.activeOutputId && this.status.coreInstalled;
         async function saveDefaults(apply) {
@@ -1242,6 +1324,47 @@ return view.extend({
             settings.tunGso = tunFields.gso.read();
             settings.tunGsoMaxSize = tunFields.gsoMaxSize.read();
             settings.tunEndpointIndependentNat = tunFields.endpointIndependentNat.read();
+            settings.dnsEnable = dnsFields.enable.read();
+            settings.dnsEnhancedMode = dnsFields.mode.read();
+            settings.dnsIpv6 = dnsFields.ipv6.read();
+            settings.dnsCacheAlgorithm = dnsFields.cacheAlgorithm.read();
+            settings.dnsRespectRules = dnsFields.respectRules.read();
+            settings.dnsPreferH3 = dnsFields.preferH3.read();
+            settings.dnsUseSystemHosts = dnsFields.useSystemHosts.read();
+            settings.dnsFakeIpRange = dnsFields.fakeIpRange.read().trim();
+            settings.dnsFakeIpRange6 = dnsFields.fakeIpRange6.read().trim();
+            settings.dnsFakeIpFilterMode = dnsFields.fakeIpFilterMode.read();
+            settings.dnsFakeIpFilter = dnsFields.fakeIpFilter.read();
+            settings.dnsNameservers = dnsFields.nameservers.read();
+            settings.dnsDefaultNameservers = dnsFields.defaultNameservers.read();
+            settings.dnsProxyServerNameservers = dnsFields.proxyServerNameservers.read();
+            settings.dnsDirectNameservers = dnsFields.directNameservers.read();
+            settings.dnsFallback = dnsFields.fallback.read();
+            settings.dnsNameserverPolicy = dnsPolicy.read();
+            settings.dnsProxyServerNameserverPolicy = dnsProxyPolicy.read();
+            settings.dnsUseWanDns = dnsWan.read();
+            settings.dnsWanDnsPrefer = dnsWanPrefer.read() === 'prefer';
+            settings.dnsUseHosts = dnsFields.useHosts.read();
+            settings.dnsHosts = dnsHostsEditor.read();
+            var badHosts = '';
+            Object.keys(settings.dnsHosts).some(function(domain) {
+                return settings.dnsHosts[domain].some(function(value) {
+                    if (!/^(?:\d{1,3}\.){3}\d{1,3}$|^[0-9a-fA-F:]{2,45}$/.test(value)) {
+                        badHosts = '静态解析「' + domain + '」的值必须是 IP 地址：' + value; return true;
+                    }
+                });
+            });
+            if (badHosts) { notify(badHosts, true); return; }
+            var badDns = '';
+            [['默认 DNS', settings.dnsNameservers, true], ['引导 DNS', settings.dnsDefaultNameservers, false],
+             ['代理节点 DNS', settings.dnsProxyServerNameservers, false], ['直连 DNS', settings.dnsDirectNameservers, false],
+             ['Fallback DNS', settings.dnsFallback, false], ['Fake-IP 过滤域名', settings.dnsFakeIpFilter, false]].some(function(pair) {
+                if (pair[2] && !pair[1].length) { badDns = pair[0] + '至少需要一个地址'; return true; }
+                return pair[1].some(function(value) {
+                    if (!value || /\s/.test(value)) { badDns = pair[0] + '地址不能为空或含空白：' + (value || '(空)'); return true; }
+                });
+            });
+            if (badDns) { notify(badDns, true); return; }
             var changed = {};
             Object.keys(settings).forEach(function(key) {
                 if (JSON.stringify(settings[key]) !== JSON.stringify(self.data.settings[key])) changed[key] = settings[key];
@@ -1287,28 +1410,84 @@ return view.extend({
             E('p', { 'class': 'fii-muted' }, '嗅探连接的协议域名用于域名规则分流与 DNS 映射；按字段写入运行配置，覆写中显式配置的字段优先。'),
             E('div', { 'class': 'fii-settings-grid fii-cols3' }, [snifferFields.enable.node, snifferFields.forceDnsMapping.node,
                 snifferFields.parsePureIp.node, snifferFields.overrideDestination.node]),
-            E('div', { 'class': 'fii-settings-grid fii-cols3' }, [snifferFields.httpPorts.node, snifferFields.tlsPorts.node,
-                snifferFields.quicPorts.node]),
-            snifferFields.skipDomain.node]);
+            formGroup(E('div', {}, [snifferFields.httpPorts.node, snifferFields.tlsPorts.node, snifferFields.quicPorts.node]),
+                '嗅探端口', 'HTTP / TLS / QUIC 按协议嗅探的端口范围'),
+            formGroup(snifferFields.skipDomain.node, '跳过域名', '这些域名不做嗅探，直接按原目标连接')]);
         var tunCard = E('section', { 'class': 'fii-card' }, [E('h3', {}, 'TUN（默认值）'),
             E('p', { 'class': 'fii-muted' }, '路由器设置中接管方式选择 TUN 时创建的虚拟网卡参数；按字段写入运行配置，覆写中显式配置的字段优先。'),
             E('div', { 'class': 'fii-settings-grid fii-cols3' }, [tunFields.stack.node, tunFields.mtu.node,
                 tunFields.gso.node, tunFields.gsoMaxSize.node, tunFields.endpointIndependentNat.node]),
             E('p', { 'class': 'fii-muted' }, '网卡名称、自动路由与 DNS 劫持由 FII 的透明代理接管管理，不在此开放。')]);
+        function explainEntry(entry, text) {
+            // entries() has no help option; slot a muted note right under the legend.
+            entry.node.insertBefore(E('small', {}, text), entry.node.children[1] || null);
+        }
+        explainEntry(dnsFields.nameservers, '所有域名默认用它解析，是唯一必填项；建议填一个国内 DoH（如 https://dns.alidns.com/dns-query）。');
+        explainEntry(dnsFields.defaultNameservers, '只能是纯 IP。当默认 DNS 是域名形式（如 DoH 网址）时，先用它解析出 DNS 服务器本身的地址。');
+        explainEntry(dnsFields.proxyServerNameservers, '只用来解析「代理节点服务器」的域名（如 hk.example.com），避免节点域名走代理解析造成死循环或被污染；留空自动跟随默认 DNS。');
+        explainEntry(dnsFields.directNameservers, '命中 DIRECT（直连）规则的域名用它解析，国内域名直连解析更快更准；留空使用默认 DNS。');
+        explainEntry(dnsFields.fallback, '旧版防污染机制：默认 DNS 的结果与它交叉验证后采用；新版内核建议改用下方分流策略，一般留空。');
+        var dnsWan = toggle('跟随运营商 DNS', !!s.dnsUseWanDns,
+            '生成运行配置时从 WAN（DHCP / PPPoE）读取运营商 DNS，合并进默认 DNS；地址变化在下次应用或重启服务时跟进。覆写显式配置了默认 DNS（含 dns! 整块替换）时不合并。');
+        var dnsWanPrefer = field('运营商 DNS 位置', s.dnsWanDnsPrefer ? 'prefer' : 'fallback', { select: [
+            ['fallback', '兜底（排在默认 DNS 之后，默认）'], ['prefer', '优先（排在默认 DNS 之前）']] });
+        var wanHint = E('p', { 'class': 'fii-muted', role: 'status' },
+            ((this.network || {}).wanDns || []).length
+                ? '当前检测到上游 DNS：' + this.network.wanDns.join('、') + '，应用时按上述位置合并。'
+                : '当前未检测到上游 DNS（WAN 未通过 DHCP / PPPoE 获取地址，或无 /tmp/resolv.conf.d/resolv.conf.auto）。');
+        function formBox(children) {
+            return E('div', { 'class': 'fii-form-box' }, children);
+        }
+        function formGroup(node, title, tag) {
+            // Collapsible bordered group; a lone fieldset's legend moves into
+            // the summary (see the :only-of-type rule in style.css).
+            return E('details', { 'class': 'fii-form-group' }, [
+                E('summary', {}, [title, tag ? E('span', { 'class': 'fii-form-tag' }, tag) : '']),
+                node]);
+        }
+        var dnsCards = E('div', {}, [
+            E('section', { 'class': 'fii-card' }, [E('h3', {}, 'DNS 基础（默认值）'),
+                E('p', { 'class': 'fii-muted' }, '内核内置 DNS 服务器的运行方式；按字段写入运行配置，覆写中显式配置的字段优先。监听地址与端口由 FII 的透明代理接管管理。'),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [dnsFields.enable.node, dnsFields.mode.node,
+                    dnsFields.ipv6.node, dnsFields.cacheAlgorithm.node, dnsFields.respectRules.node,
+                    dnsFields.preferH3.node, dnsFields.useSystemHosts.node, dnsFields.useHosts.node])]),
+            E('section', { 'class': 'fii-card' }, [E('h3', {}, 'Fake-IP（默认值）'),
+                E('p', { 'class': 'fii-muted' }, 'Fake-IP 模式的虚拟网段与过滤列表；过滤列表内的域名返回真实 IP。仅在 DNS 模式选择 Fake-IP 时生效。'),
+                E('div', { 'class': 'fii-settings-grid fii-cols3' }, [dnsFields.fakeIpRange.node, dnsFields.fakeIpRange6.node,
+                    dnsFields.fakeIpFilterMode.node]),
+                dnsFields.fakeIpFilter.node]),
+            E('section', { 'class': 'fii-card' }, [E('h3', {}, 'DNS 服务器与分流（默认值）'),
+                E('p', { 'class': 'fii-muted' }, '地址支持 udp://、tcp://、tls://、https://（DoH）、quic:// 与 host:port，system:// 表示系统 DNS。通常只需要配置「默认 DNS」，其余分组按需展开。'),
+                formBox([E('div', { 'class': 'fii-settings-grid fii-cols3' }, [dnsWan.node, dnsWanPrefer.node]), wanHint]),
+                formBox([dnsFields.nameservers.node]),
+                formGroup(dnsFields.defaultNameservers.node, '引导 DNS', '解析 DoH 服务器地址 · 只能纯 IP'),
+                formGroup(dnsPolicy.node, 'DNS 分流策略', '按域名指定解析服务器'),
+                formGroup(dnsFields.proxyServerNameservers.node, '代理节点 DNS', '解析节点服务器域名'),
+                formGroup(dnsProxyPolicy.node, '代理节点 DNS 策略', '按域名指定节点解析 DNS'),
+                formGroup(dnsFields.directNameservers.node, '直连 DNS', 'DIRECT 规则域名专用'),
+                formGroup(dnsFields.fallback.node, 'Fallback DNS', '旧版防污染 · 一般留空'),
+                formGroup(dnsHostsEditor.node, '静态解析 Hosts', '域名写死为指定 IP · 优先级最高')])]);
+        // Fake-IP settings only apply in fake-ip mode; keep the card out of sight otherwise.
+        var dnsFakeCard = dnsCards.children[1];
+        function syncFakeIpCard() { dnsFakeCard.hidden = dnsFields.mode.read() !== 'fake-ip'; }
+        dnsFields.mode.control.addEventListener('change', syncFakeIpCard);
+        syncFakeIpCard();
         form.appendChild(generalCards);
+        form.appendChild(dnsCards);
         form.appendChild(snifferCard);
         form.appendChild(tunCard);
         form.appendChild(saveActions);
         if (!canApply) form.appendChild(E('p', { 'class': 'fii-muted' }, '首次使用请先在输出页生成一份运行配置。'));
-        form.appendChild(E('p', { 'class': 'fii-muted' }, 'Mihomo 的 DNS、规则和代理组在覆写中配置；这里提供内核、接入端口、通用参数与嗅探的默认值。'));
+        form.appendChild(E('p', { 'class': 'fii-muted' }, 'Mihomo 的规则和代理组在覆写中配置；这里提供内核、接入端口、通用参数、DNS 与嗅探的默认值。'));
         var corePanel = this.corePanel();
         var tabs = E('nav', { 'class': 'fii-settings-tabs', 'aria-label': 'Mihomo 页面分类' });
-        var sections = { core: corePanel, general: generalCards, sniffer: snifferCard, tun: tunCard };
+        var sections = { core: corePanel, general: generalCards, dns: dnsCards, sniffer: snifferCard, tun: tunCard };
         function showSection(key) {
             self.mihomoSection = key;
             sections.core.hidden = key !== 'core';
             form.hidden = key === 'core';
             sections.general.hidden = key !== 'general';
+            sections.dns.hidden = key !== 'dns';
             sections.sniffer.hidden = key !== 'sniffer';
             sections.tun.hidden = key !== 'tun';
             Array.from(tabs.children).forEach(function(tab) {
@@ -1316,7 +1495,7 @@ return view.extend({
                 tab.setAttribute('aria-pressed', String(tab.dataset.section === key));
             });
         }
-        [['core', '内核'], ['general', '全局配置'], ['sniffer', '嗅探'], ['tun', 'TUN']].forEach(function(pair) {
+        [['core', '内核'], ['general', '全局配置'], ['dns', 'DNS'], ['sniffer', '嗅探'], ['tun', 'TUN']].forEach(function(pair) {
             tabs.appendChild(button(pair[1], function() { showSection(pair[0]); }, false, { 'class': 'fii-settings-tab', 'data-section': pair[0] }));
         });
         showSection(self.mihomoSection || 'core');

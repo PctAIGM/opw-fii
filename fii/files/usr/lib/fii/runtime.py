@@ -56,8 +56,8 @@ def overlay(body, settings, warnings=None):
     tun = "tun" in protocols.values()
     root = load_map(body)
     original = copy.deepcopy(root) if warnings is not None else None
-    from .mihomo import seed, dns_options
-    seed(root, final=True)
+    from .mihomo import seed, seed_dns, dns_options
+    seed(root)
     # These are owned by the router integration. User overrides cannot desynchronise routing.
     for key in ("port", "socks-port", "external-controller-tls", "external-controller-unix",
                 "external-controller-pipe", "authentication", "lan-allowed-ips", "lan-disallowed-ips"):
@@ -139,6 +139,14 @@ def overlay(body, settings, warnings=None):
                         "inet6-address": ["fdfe:dcba:9876::1/126"] if settings["ipv6"] else []})
     dns = root.get("dns", {})
     check(isinstance(dns, dict), "dns 覆写必须是对象")
+    # DNS defaults follow the same model as sniffer/TUN: fields still at their
+    # built-in defaults are seeded from router settings; overrides win.
+    seed_dns(dns, settings)
+    hosts_map = settings.get("dnsHosts") or {}
+    check(not root.get("hosts") or isinstance(root.get("hosts"), dict), "hosts 覆写必须是对象")
+    if hosts_map:
+        # The hosts table backs dns.use-hosts; an explicit override wins.
+        root.setdefault("hosts", copy.deepcopy(hosts_map))
     from .proxy_nft import dns_families
     dns_options(root)  # Validate the routing inputs before producing a preview.
     from .proxy import rules

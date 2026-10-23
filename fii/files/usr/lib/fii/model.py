@@ -34,6 +34,18 @@ def defaults():
             "snifferSkipDomain": ["+.lan", "+.local", "+.home.arpa", "Mijia Cloud"],
             "coreTunStack": "mixed", "coreTunMtu": 1500,
             "tunGso": False, "tunGsoMaxSize": 65536, "tunEndpointIndependentNat": False,
+            "dnsEnable": True, "dnsEnhancedMode": "redir-host", "dnsIpv6": False,
+            "dnsCacheAlgorithm": "lru", "dnsRespectRules": False, "dnsPreferH3": False,
+            "dnsUseSystemHosts": True,
+            "dnsFakeIpRange": "198.18.0.1/16", "dnsFakeIpRange6": "fc00::/18",
+            "dnsFakeIpFilter": ["+.lan", "+.local"], "dnsFakeIpFilterMode": "blacklist",
+            "dnsNameservers": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
+            "dnsDefaultNameservers": ["223.5.5.5", "119.29.29.29"],
+            "dnsProxyServerNameservers": [], "dnsDirectNameservers": [], "dnsFallback": [],
+            "dnsNameserverPolicy": {"+.lan": ["127.0.0.1:53"], "+.local": ["127.0.0.1:53"]},
+            "dnsProxyServerNameserverPolicy": {},
+            "dnsUseWanDns": False, "dnsWanDnsPrefer": False,
+            "dnsUseHosts": False, "dnsHosts": {},
             "bypass": [],
             "lanProxy": True, "routerProxy": False, "udpProxy": True,
             "routerDnsHijack": True, "dnsIpv6Hijack": True,
@@ -103,6 +115,27 @@ def exhausted(source):
     usage = [source.get(k) for k in ("uploadBytes", "downloadBytes")
              if source.get(k) is not None]
     return total is not None and total > 0 and bool(usage) and sum(usage) >= total
+
+
+def dns_server_list(value, label, minimum=0):
+    """DNS server addresses: udp/tcp/dot/doh/doq urls or bare host:port text."""
+    check(isinstance(value, list) and minimum <= len(value) <= 16, label + "列表无效")
+    for entry in value:
+        check(isinstance(entry, str) and 0 < len(entry) <= 2048
+              and not any(c.isspace() for c in entry), label + "地址无效")
+    return value
+
+
+def dns_policy_map(value, label):
+    """Mihomo nameserver-policy style maps: matcher -> server list."""
+    check(isinstance(value, dict) and len(value) <= 64, label + "无效或超过 64 项")
+    for matcher, servers in value.items():
+        check(isinstance(matcher, str) and 0 < len(matcher) <= 256
+              and not any(c.isspace() for c in matcher), label + "的域名或匹配条件无效")
+        check(isinstance(servers, list) and 1 <= len(servers) <= 8,
+              label + "「%s」至少需要一个 DNS 地址" % matcher[:64])
+        dns_server_list(servers, label + "「%s」" % matcher[:64], minimum=1)
+    return value
 
 
 def validate(data):
@@ -181,6 +214,12 @@ def validate(data):
                 "snifferOverrideDestination", "snifferHttpPorts", "snifferTlsPorts",
                 "snifferQuicPorts", "snifferSkipDomain",
                 "coreTunStack", "coreTunMtu", "tunGso", "tunGsoMaxSize", "tunEndpointIndependentNat",
+                "dnsEnable", "dnsEnhancedMode", "dnsIpv6", "dnsCacheAlgorithm", "dnsRespectRules",
+                "dnsPreferH3", "dnsUseSystemHosts", "dnsFakeIpRange", "dnsFakeIpRange6",
+                "dnsFakeIpFilter", "dnsFakeIpFilterMode", "dnsNameservers", "dnsDefaultNameservers",
+                "dnsProxyServerNameservers", "dnsDirectNameservers", "dnsFallback",
+                "dnsNameserverPolicy", "dnsProxyServerNameserverPolicy",
+                "dnsUseWanDns", "dnsWanDnsPrefer", "dnsUseHosts", "dnsHosts",
                 "externalUi", "externalUiName", "externalUiUrl"):
         if key not in settings:
             settings[key] = setting_defaults[key]
@@ -194,7 +233,9 @@ def validate(data):
                 "disableQuicEcn", "skipCoreIpv6Check", "unifiedDelay", "tcpConcurrent",
                 "geodataMode", "geoAutoUpdate", "etagSupport", "coreIpv6",
                 "snifferEnable", "snifferForceDnsMapping", "snifferParsePureIp",
-                "snifferOverrideDestination", "tunGso", "tunEndpointIndependentNat"):
+                "snifferOverrideDestination", "tunGso", "tunEndpointIndependentNat",
+                "dnsEnable", "dnsIpv6", "dnsRespectRules", "dnsPreferH3", "dnsUseSystemHosts",
+                "dnsUseWanDns", "dnsWanDnsPrefer", "dnsUseHosts"):
         check(type(settings.get(key)) is bool, key + "必须是布尔值")
     check(type(settings["bootDelay"]) is int and 0 <= settings["bootDelay"] <= 600,
           "开机延迟必须是 0–600 秒")
@@ -218,6 +259,46 @@ def validate(data):
           "Keep-Alive 空闲时间必须是 1–3600 秒")
     check(type(settings["geoUpdateInterval"]) is int and 1 <= settings["geoUpdateInterval"] <= 720,
           "GEO 更新间隔必须是 1–720 小时")
+    check(settings.get("dnsEnhancedMode") in ("fake-ip", "redir-host"), "DNS 模式无效")
+    check(settings.get("dnsCacheAlgorithm") in ("lru", "arc"), "DNS 缓存算法无效")
+    check(settings.get("dnsFakeIpFilterMode") in ("blacklist", "whitelist", "rule"), "Fake-IP 过滤模式无效")
+    for key, version in (("dnsFakeIpRange", 4), ("dnsFakeIpRange6", 6)):
+        try:
+            fake_network = ipaddress.ip_network(settings[key], strict=False)
+        except ValueError:
+            raise ValueError("Fake-IP 网段无效: " + key) from None
+        check(fake_network.version == version and fake_network.prefixlen > 0, "Fake-IP 网段无效: " + key)
+    fake_filter = settings["dnsFakeIpFilter"]
+    check(isinstance(fake_filter, list) and len(fake_filter) <= 256, "Fake-IP 过滤列表无效或超过 256 项")
+    for entry in fake_filter:
+        check(isinstance(entry, str) and 0 < len(entry) <= 256
+              and not any(c.isspace() for c in entry), "Fake-IP 过滤域名无效")
+    dns_server_list(settings["dnsNameservers"], "默认 DNS", minimum=1)
+    for entry in settings["dnsDefaultNameservers"]:
+        # ip_address() happily accepts integers, so gate on text first.
+        check(isinstance(entry, str), "引导 DNS 必须是 IP 地址")
+        try:
+            ipaddress.ip_address(entry)
+        except ValueError:
+            raise ValueError("引导 DNS 必须是 IP 地址") from None
+    for key, label in (("dnsProxyServerNameservers", "代理节点 DNS"), ("dnsDirectNameservers", "直连 DNS"),
+                       ("dnsFallback", "Fallback DNS")):
+        dns_server_list(settings[key], label)
+    dns_policy_map(settings["dnsNameserverPolicy"], "DNS 分流策略")
+    dns_policy_map(settings["dnsProxyServerNameserverPolicy"], "代理节点 DNS 策略")
+    hosts = settings["dnsHosts"]
+    check(isinstance(hosts, dict) and len(hosts) <= 64, "静态解析 Hosts 无效或超过 64 项")
+    for domain, addresses in hosts.items():
+        check(isinstance(domain, str) and 0 < len(domain) <= 256
+              and not any(c.isspace() for c in domain), "静态解析的域名无效")
+        check(isinstance(addresses, list) and 1 <= len(addresses) <= 8,
+              "静态解析「%s」至少需要一个 IP 地址" % domain[:64])
+        for entry in addresses:
+            check(isinstance(entry, str), "静态解析的 IP 地址无效")
+            try:
+                ipaddress.ip_address(entry)
+            except ValueError:
+                raise ValueError("静态解析「%s」的值必须是 IP 地址" % domain[:64]) from None
     geox = settings.get("geoxUrls")
     check(isinstance(geox, dict) and len(geox) <= 4, "GEO 下载地址无效")
     for key, value in geox.items():

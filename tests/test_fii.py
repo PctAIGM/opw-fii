@@ -445,7 +445,55 @@ class NetworkGenerationTests(unittest.TestCase):
     def test_network_choices_tolerate_unavailable_platform(self):
         from fii import network
         with TestDirectory() as tmp, patch.dict(os.environ, {"FII_ROOT": tmp}), patch.object(network, "run", return_value=""):
-            self.assertEqual(network.choices(), {"devices": [], "hosts": [], "users": [], "groups": [], "cgroups": [], "cgroupV2": False})
+            self.assertEqual(network.choices(), {"devices": [], "hosts": [], "users": [], "groups": [], "cgroups": [], "cgroupV2": False, "wanDns": []})
+
+    def test_wan_dns_reads_netifd_upstream_file(self):
+        from fii import network
+        with TestDirectory() as tmp, patch.dict(os.environ, {"FII_ROOT": tmp}):
+            upstream = Path(tmp) / "tmp/resolv.conf.d/resolv.conf.auto"
+            upstream.parent.mkdir(parents=True)
+            upstream.write_text("# Interface wan\nnameserver 10.0.2.3\nnameserver ::1\nnameserver 127.0.0.1\n"
+                                "nameserver not-an-ip\nnameserver 10.0.2.3\nnameserver fe80::1\n"
+                                "nameserver 2001:db8::53\n", encoding="utf-8")
+            self.assertEqual(network.wan_dns(), ["10.0.2.3", "2001:db8::53"])
+            with patch.object(network, "run", return_value=""):
+                self.assertEqual(network.choices()["wanDns"], ["10.0.2.3", "2001:db8::53"])
+
+    def test_wan_dns_follow_merges_upstream_into_nameserver(self):
+        from fii import network
+        data = sample()
+        settings = data["settings"]
+        base = list(settings["dnsNameservers"])
+        with patch.object(network, "wan_dns", return_value=["10.0.2.3", "10.0.2.4"]):
+            # Off by default: the list stays exactly as configured.
+            self.assertEqual(render.load_map(render.render(data, "p1")["yaml"])["dns"]["nameserver"], base)
+            settings["dnsUseWanDns"] = True
+            self.assertEqual(render.load_map(render.render(data, "p1")["yaml"])["dns"]["nameserver"],
+                             base + ["10.0.2.3", "10.0.2.4"])
+            settings["dnsWanDnsPrefer"] = True
+            self.assertEqual(render.load_map(render.render(data, "p1")["yaml"])["dns"]["nameserver"],
+                             ["10.0.2.3", "10.0.2.4"] + base)
+            # Upstream entries already present are not merged twice.
+            settings["dnsNameservers"] = ["223.5.5.5"]
+            with patch.object(network, "wan_dns", return_value=["223.5.5.5", "10.0.2.3"]):
+                self.assertEqual(render.load_map(render.render(data, "p1")["yaml"])["dns"]["nameserver"],
+                                 ["10.0.2.3", "223.5.5.5"])
+            # Overrides run after the merge: an explicit nameserver — including a
+            # full dns! block replacement — keeps full control of the list.
+            settings["dnsNameservers"] = base
+            data["overrides"] = [{"id": "o1", "name": "DNS 接管", "enabled": True, "global": False,
+                                  "type": "YAML", "body": "dns: {nameserver: [1.1.1.1]}"}]
+            data["outputs"][0]["overrideIds"] = ["o1"]
+            self.assertEqual(render.load_map(render.render(data, "p1")["yaml"])["dns"]["nameserver"], ["1.1.1.1"])
+            data["overrides"][0]["body"] = "dns!: {nameserver: [9.9.9.9]}"
+            self.assertEqual(render.load_map(render.render(data, "p1")["yaml"])["dns"]["nameserver"], ["9.9.9.9"])
+        with patch.object(network, "wan_dns", return_value=[]):
+            result = render.render(sample(), "p1")
+            self.assertEqual(render.load_map(result["yaml"])["dns"]["nameserver"], base)
+            follow = sample()
+            follow["settings"]["dnsUseWanDns"] = True
+            result = render.render(follow, "p1")
+            self.assertTrue(any("运营商" in warning for warning in result["warnings"]))
 
     def test_old_settings_keep_scope_and_dns_on_read(self):
         data = sample()
@@ -523,14 +571,33 @@ class NetworkGenerationTests(unittest.TestCase):
                            ("snifferHttpPorts", "80"), ("snifferSkipDomain", [123]), ("snifferSkipDomain", [""]),
                            ("coreTunStack", "bogus"), ("coreTunStack", "mips"), ("coreTunMtu", 1279),
                            ("coreTunMtu", 9001), ("coreTunMtu", "1500"), ("tunGsoMaxSize", 0),
-                           ("tunGsoMaxSize", 1048577)]:
+                           ("tunGsoMaxSize", 1048577),
+                           ("dnsEnhancedMode", "bogus"), ("dnsCacheAlgorithm", "fifo"),
+                           ("dnsFakeIpFilterMode", "gray"), ("dnsFakeIpRange", "10.0.0.300/24"),
+                           ("dnsFakeIpRange", "fc00::/18"), ("dnsFakeIpRange6", "198.18.0.1/16"),
+                           ("dnsNameservers", []), ("dnsNameservers", "223.5.5.5"),
+                           ("dnsNameservers", ["https://a.example.com/dns-query", "a b"]),
+                           ("dnsDefaultNameservers", ["dns.example.com"]),
+                           ("dnsDefaultNameservers", [223]),
+                           ("dnsProxyServerNameservers", [" a"]), ("dnsDirectNameservers", [""]),
+                           ("dnsFallback", [[]]), ("dnsFakeIpFilter", ["+.ok", "bad domain"]),
+                           ("dnsFakeIpFilter", "80"), ("dnsNameserverPolicy", {"+.lan": []}),
+                           ("dnsNameserverPolicy", {"a b": ["1.1.1.1"]}),
+                           ("dnsNameserverPolicy", {"+.lan": "1.1.1.1"}),
+                           ("dnsProxyServerNameserverPolicy", {"+.lan": [1]}),
+                           ("dnsProxyServerNameserverPolicy", ["1.1.1.1"]),
+                           ("dnsUseWanDns", "on"), ("dnsWanDnsPrefer", 1),
+                           ("dnsHosts", ["1.1.1.1"]), ("dnsHosts", {"a b": ["1.1.1.1"]}),
+                           ("dnsHosts", {"+.lan": "1.1.1.1"}), ("dnsHosts", {"+.lan": ["not-an-ip"]}),
+                           ("dnsHosts", {"+.lan": [223]})]:
             with self.subTest(key=key, value=value):
                 data = sample()
                 data["settings"][key] = value
                 with self.assertRaises(ValueError):
                     model.validate(data)
         for key in ("snifferEnable", "snifferForceDnsMapping", "snifferParsePureIp", "snifferOverrideDestination",
-                    "tunGso", "tunEndpointIndependentNat"):
+                    "tunGso", "tunEndpointIndependentNat", "dnsEnable", "dnsIpv6", "dnsRespectRules",
+                    "dnsPreferH3", "dnsUseSystemHosts", "dnsUseWanDns", "dnsWanDnsPrefer", "dnsUseHosts"):
             with self.subTest(key=key):
                 data = sample()
                 data["settings"][key] = "on"
@@ -702,6 +769,95 @@ class NetworkGenerationTests(unittest.TestCase):
         self.assertEqual(config["tun"]["device"], "fii-tun")
         self.assertFalse(config["tun"]["auto-route"])
         self.assertEqual(config["tun"]["dns-hijack"], [])
+
+    def test_dns_defaults_seed_runtime_and_overrides_win(self):
+        settings = model.defaults()["settings"]
+        config = render.load_map(runtime.overlay("", settings))["dns"]
+        self.assertTrue(config["enable"])
+        self.assertEqual(config["enhanced-mode"], "redir-host")
+        self.assertFalse(config["ipv6"])
+        self.assertEqual(config["cache-algorithm"], "lru")
+        self.assertFalse(config["respect-rules"])
+        self.assertFalse(config["prefer-h3"])
+        self.assertTrue(config["use-system-hosts"])
+        self.assertFalse(config["use-hosts"])
+        self.assertEqual(config["fake-ip-range"], "198.18.0.1/16")
+        self.assertEqual(config["fake-ip-range6"], "fc00::/18")
+        self.assertEqual(config["fake-ip-filter"], ["+.lan", "+.local"])
+        self.assertEqual(config["fake-ip-filter-mode"], "blacklist")
+        self.assertEqual(config["nameserver"], settings["dnsNameservers"])
+        self.assertEqual(config["default-nameserver"], settings["dnsDefaultNameservers"])
+        self.assertEqual(config["nameserver-policy"], {"+.lan": ["127.0.0.1:53"], "+.local": ["127.0.0.1:53"]})
+        # proxy-server-nameserver mirrors nameserver; optional lists stay absent.
+        self.assertEqual(config["proxy-server-nameserver"], config["nameserver"])
+        self.assertNotIn("direct-nameserver", config)
+        self.assertNotIn("fallback", config)
+        self.assertNotIn("proxy-server-nameserver-policy", config)
+        self.assertEqual(config["listen"], "0.0.0.0:1053")
+        tuned = dict(settings, dnsEnable=True, dnsEnhancedMode="fake-ip", dnsIpv6=True, dnsCacheAlgorithm="arc",
+                     dnsRespectRules=True, dnsPreferH3=True, dnsUseSystemHosts=False,
+                     dnsFakeIpRange="28.0.0.1/8", dnsFakeIpRange6="fd00::/8",
+                     dnsFakeIpFilter=["+.example.com"], dnsFakeIpFilterMode="whitelist",
+                     dnsNameservers=["https://dns.example.com/dns-query"], dnsDefaultNameservers=["9.9.9.9"],
+                     dnsProxyServerNameservers=["223.5.5.5"], dnsDirectNameservers=["119.29.29.29"],
+                     dnsFallback=["8.8.8.8"],
+                     dnsNameserverPolicy={"+.cn": ["https://doh.pub/dns-query"]},
+                     dnsProxyServerNameserverPolicy={"geosite:cn": ["223.5.5.5"]},
+                     dnsUseHosts=True, dnsHosts={"router.lan": ["192.168.1.1"], "*.corp": ["10.0.0.2", "fd00::2"]})
+        model.validate({**model.defaults(), "settings": tuned})
+        config = render.load_map(runtime.overlay("", tuned))["dns"]
+        self.assertEqual(config["enhanced-mode"], "fake-ip")
+        self.assertTrue(config["use-hosts"])
+        self.assertTrue(config["ipv6"])
+        self.assertEqual(config["cache-algorithm"], "arc")
+        self.assertTrue(config["respect-rules"])
+        self.assertTrue(config["prefer-h3"])
+        self.assertFalse(config["use-system-hosts"])
+        self.assertEqual(config["fake-ip-range"], "28.0.0.1/8")
+        self.assertEqual(config["fake-ip-range6"], "fd00::/8")
+        self.assertEqual(config["fake-ip-filter"], ["+.example.com"])
+        self.assertEqual(config["fake-ip-filter-mode"], "whitelist")
+        self.assertEqual(config["nameserver"], ["https://dns.example.com/dns-query"])
+        self.assertEqual(config["default-nameserver"], ["9.9.9.9"])
+        self.assertEqual(config["proxy-server-nameserver"], ["223.5.5.5"])
+        self.assertEqual(config["direct-nameserver"], ["119.29.29.29"])
+        self.assertEqual(config["fallback"], ["8.8.8.8"])
+        self.assertEqual(config["nameserver-policy"], {"+.cn": ["https://doh.pub/dns-query"]})
+        self.assertEqual(config["proxy-server-nameserver-policy"], {"geosite:cn": ["223.5.5.5"]})
+        # The hosts table lands at the document root and backs dns.use-hosts.
+        hosts = render.load_map(runtime.overlay("", tuned))
+        self.assertEqual(hosts["hosts"], {"router.lan": ["192.168.1.1"], "*.corp": ["10.0.0.2", "fd00::2"]})
+        self.assertNotIn("hosts", render.load_map(runtime.overlay("", settings)))
+        # An explicit override keeps full control of the hosts table.
+        overridden = render.load_map(runtime.overlay("hosts: {pin.example.com: [1.1.1.1]}\n", tuned))
+        self.assertEqual(overridden["hosts"], {"pin.example.com": ["1.1.1.1"]})
+        self.assertTrue(overridden["dns"]["use-hosts"])
+        # Explicit override fields win per field; default-valued fields follow settings.
+        body = ("dns: {fake-ip-filter: ['+.override.com'],\n"
+                "  nameserver-policy: {'+.corp': ['127.0.0.1:5353']}, proxy-server-nameserver: [1.2.3.4],\n"
+                "  fallback: [8.8.4.4]}\n")
+        config = render.load_map(runtime.overlay(body, tuned))["dns"]
+        self.assertEqual(config["fake-ip-filter"], ["+.override.com"])
+        # Policy entries merge with the built-in local entries; a whole-map
+        # replacement only happens while the policy is still the built-in one.
+        self.assertEqual(config["nameserver-policy"], {"+.corp": ["127.0.0.1:5353"],
+                                                       "+.lan": ["127.0.0.1:53"], "+.local": ["127.0.0.1:53"]})
+        self.assertEqual(config["proxy-server-nameserver"], ["1.2.3.4"])
+        self.assertEqual(config["fallback"], ["8.8.4.4"])
+        # Fields left at the built-in default adopt the settings value instead.
+        self.assertEqual(config["nameserver"], ["https://dns.example.com/dns-query"])
+        self.assertEqual(config["default-nameserver"], ["9.9.9.9"])
+        # An override equal to the built-in default is indistinguishable from absent.
+        config = render.load_map(runtime.overlay("dns: {enhanced-mode: redir-host}\n", tuned))["dns"]
+        self.assertEqual(config["enhanced-mode"], "fake-ip")
+        # A non-default explicit override still wins.
+        config = render.load_map(runtime.overlay("dns: {enhanced-mode: fake-ip}\n", settings))["dns"]
+        self.assertEqual(config["enhanced-mode"], "fake-ip")
+        # Settings patches accept the new DNS keys; legacy names stay rejected.
+        patched = cli.apply_patch(model.defaults(), {"settings": {"dnsEnhancedMode": "redir-host"}})
+        self.assertEqual(patched["settings"]["dnsEnhancedMode"], "redir-host")
+        with self.assertRaises(ValueError):
+            cli.apply_patch(model.defaults(), {"settings": {"dnsMode": "redir-host"}})
 
     def test_controller_secret_has_no_minimum_length(self):
         for value in ("", "short", "1234"):

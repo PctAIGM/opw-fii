@@ -5,7 +5,7 @@
     "action": {
       "type": "view",
       "path": "fii/app",
-      "version": "c5840d35ba71000f"
+      "version": "8794ab6713c55e12"
     },
     "depends": {
       "acl": [

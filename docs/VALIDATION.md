@@ -612,3 +612,49 @@ The router acceptance result should be added only after actually performing thes
 - 实现第三次踩中 BASE/DEFAULTS 挡位坑：先从 `mihomo.py DEFAULTS` 移除写死的 `tun: {stack, mtu}`，`runtime.overlay()` 再按字段 setdefault 注入（覆写显式配置优先）。settings 键名绕开 LEGACY_KEYS：`coreTunStack`/`coreTunMtu`/`tunGso`/`tunGsoMaxSize`/`tunEndpointIndependentNat`。
 - Python 246 项通过（新增 tun 默认/调参/字段级覆写优先/接管字段无视覆写强制；回填与非法值用例扩展——含 `coreTunStack: mips` 拒绝以锁定三选项口径）。
 - VM 验证：默认 apply 后 tun 块含 5 个新字段默认值；保存 gvisor/1420/gso/32768/EIM-NAT 并把接管方式切到 TUN 后 `enable: true`、fii-tun 设备 UP；VM 携带的旧迁移覆写声明 stack/mtu 时覆写优先（设备 MTU 实际 1500），从覆写中移除 tun 后 settings 生效（stack: gvisor、设备 MTU 实际 1420）；全部恢复基线后服务 READY。注意点：TUN 接管是路由器设置的 TCP/UDP 代理方式选 TUN，`mode: core` 反而不做任何拦截（modes() 返回 off）；VM 上走真实 save 路径需携带当前 `revision`，`python3 -m fii.cli` 需 `PYTHONPATH=/usr/lib`。前端本轮仍无 playwright，以服务端 JS + 既有同构页签模式为证。
+
+### 2026-10-23 追加：DNS 二级页签（0.1.1-48/49）
+
+- Mihomo 页二级页签扩展为 内核 / 全局配置 / DNS / 嗅探 / TUN。DNS 页三张卡：基础（启用、模式、IPv6 解析、缓存算法 LRU/ARC、遵循分流规则、DoH 优先 HTTP/3、系统 Hosts）、Fake-IP（网段 4/6、过滤域名、过滤模式黑/白/规则）、DNS 服务器与分流（默认/引导/代理节点/直连/Fallback 五组列表 + nameserver-policy 与 proxy-server-nameserver-policy 两个域名策略编辑器，支持 +.example.com、geosite:cn 匹配语法）。`dns.listen` 仍归 FII 接管。DNS 模式默认 **redir-host**（用户指定），非 Fake-IP 模式时整张 Fake-IP 卡隐藏；服务器每组下方带用途说明。
+- 注入语义与 sniffer/tun 不同：render 的 `seed()` 先把 `DEFAULTS['dns']` 整块填入，故 `mihomo.seed_dns()` 用「字段缺失或仍等于内置默认值 → 用设置值替换」模型（覆写字段非默认值即胜出；覆写恰等于内置默认值时与未配置不可区分）；proxy-server-nameserver 视「等于 nameserver 镜像」为默认来源；nameserver-policy 条目级深合并（覆写加条目时内置 +.lan/+.local 保留）；空可选列表/空策略不写入。设置键 18 个 `dns*` 前缀、全部避开 LEGACY_KEYS 旧名；引导 DNS 必须纯 IP（`ip_address(223)` 会把整数当地址，先 isinstance(str) 再解析）。
+- Python 247 项通过（新增 DNS 默认值/调参/等值替换语义/非法值约 20 组；`test_proxy` 的 Fake-IP ping 豁免用例改为显式传 fake-ip 配置）。真实内核 v1.19.32 `-t`：默认 redir-host 与全量调参（含 geosite:cn 的 proxy-server-nameserver-policy，内核加载 110446 条 geosite 记录）均通过。Playwright（preview.html + 本地 mock）：tab 渲染、策略条目增删、保存差量载荷仅含变更字段、Redir-Host 下 Fake-IP 卡隐藏/切 Fake-IP 显现。
+- VM 验证：0.1.1-48→49 升级均自动恢复服务；`fii save/apply` 后 `/tmp/fii/config.yaml` 的 dns 块逐字段生效；redir-host 生效前需注意两件事——①状态文件在首次 save 时会把当时的 settings 默认值整体固化（既有机制），48 之前装过并保存过的机器 dnsEnhancedMode 已固化为 fake-ip，需在 DNS 页改一次；②旧版迁移覆写（origin=legacy-mihomo-settings）若声明了 dns 块会按覆写优先压住设置，测试机已将其 dns 块移除（保留 ipv6/tun）。代理节点 DNS 策略默认空 `{}`，不写入运行配置。
+
+### 2026-10-23 追加：跟随运营商 DNS（0.1.1-50）
+
+- DNS 服务器卡新增「跟随运营商 DNS」开关与「运营商 DNS 位置」（兜底=排在默认 DNS 之后（默认）/ 优先=排最前），并实时显示检测到的上游 DNS（来自 network RPC 的 wanDns）。开启后 `runtime.overlay()` 在**生成运行配置时**经 `network.wan_dns()` 读取 `/tmp/resolv.conf.d/resolv.conf.auto`（netifd 从 DHCP/PPPoE 写入；过滤回环/链路本地/非法与重复地址，最多 4 条）合并进 dns.nameserver——地址变化在下次应用/重启时跟进；未检测到时在应用结果 warnings 里提示。默认 DNS 被覆写显式接管（nameserver ≠ 设置列表）时不合并，覆写保留完整控制权。
+- 设置键 `dnsUseWanDns`/`dnsWanDnsPrefer`（均默认关）；ucode 原生 `network` 响应同步补 `wanDns`（提示级正则过滤，严格校验在 Python 注入路径）。
+- 坑：rpc.uc 的正则是 POSIX ERE，**不支持 `(?:` 非捕获组**——首版写法导致整个 ucode 插件加载失败、`luci.fii` 未注册（只剩 exec 后备 `luci.fii.worker`），改用普通捕获组后恢复；改 rpc.uc 后必须在 VM 上 rpcd restart 并确认 `ubus list | grep '^luci.fii$'`。ucode 夹具（本地无 ucode 运行时）补 wanDns 断言。
+- Python 249 项通过（新增：wan_dns 解析过滤去重、注入兜底/优先/去重/覆写优先/空检测告警、network choices 含 wanDns、非法布尔拒绝）。VM 端到端：slirp 上游 10.0.2.3 兜底合并到 nameserver 末尾、切「优先」后 apply 排最前；ucode 原生 network 返回 wanDns=['10.0.2.3']；Playwright 冒烟：开关/位置/检测提示渲染、保存差量载荷仅含 dnsUseWanDns。
+
+### 2026-10-23 追加：DNS 页分组视觉重构（0.1.1-51）
+
+- 用户反馈「DNS 配置项多、各项之间没有明显边界」。「DNS 服务器与分流」卡重构：①「跟随运营商 DNS」（开关+位置+检测提示）与「默认 DNS」（唯一必填组）放入带边框圆角、软底色的常显盒子（.fii-dns-box）；②其余 6 组（引导 DNS / DNS 分流策略 / 代理节点 DNS / 代理节点 DNS 策略 / 直连 DNS / Fallback DNS，按常用度排序）收进可折叠分组（.fii-dns-group = details/summary，默认收起，summary 显示组名 + 灰色短标签如「解析 DoH 服务器地址 · 只能纯 IP」，展开箭头 ▸/▾）；组内 legend 由 CSS 隐藏（标题上移到 summary，控件与 read() 不变）。页面从约 7 个无边界堆叠的 fieldset 变为 2 个盒子 + 6 条紧凑折叠条。
+- CSS 新增 .fii-dns-box/.fii-dns-group/.fii-dns-tag（style.css 追加；fiiStyleHash 由 build_ipk.py 自动同步为内容哈希，本次 020b307a0d242b1e）。保存/差量逻辑不变（控件仍在 DOM，details 收起不影响 read()）。
+- Python 249 项通过、node --check 通过；Playwright：6 组默认全收起、标签正确、展开后 legend 隐藏内容可见、保存按钮可达；截图经图像分析核验（外层卡片+内层盒子+折叠条层级清晰、无重叠溢出）。VM 已升级 0.1.1-51，服务运行正常，/www 下 app.js 含分组代码。
+
+### 2026-10-23 追加：嗅探卡同款分组处理（0.1.1-52）
+
+- 用户要求嗅探卡的 HTTP/TLS/QUIC 端口与跳过域名同样处理。CSS 类名由 DNS 专用改为通用（.fii-dns-box/.fii-dns-group/.fii-dns-tag → .fii-form-box/.fii-form-group/.fii-form-tag），helper 改名 formBox/formGroup 并改为接受节点参数。legend 隐藏规则改为 `fieldset:only-of-type>legend`（单 fieldset 组标题并入 summary；多 fieldset 组内各列表标题保留），新增 `.fii-selection+.fii-selection` 顶部分隔线（端口三列表竖排边界）。
+- 嗅探卡现为：4 个开关网格 + 折叠组「嗅探端口」（HTTP/TLS/QUIC 三个列表竖排、分隔线、各自标题可见，标签「HTTP / TLS / QUIC 按协议嗅探的端口范围」）+ 折叠组「跳过域名」（标签「这些域名不做嗅探，直接按原目标连接」）；两组默认收起。DNS 卡同步换用新类名，行为不变。
+- Python 249 项通过、node --check 通过；Playwright：嗅探卡 2 组默认收起、端口组展开后三列表标题显示且分隔线生效、跳过域名组 legend 隐藏、DNS 卡 8 组无回归（旧类名零残留）；截图 build/sniffer-grouped.png。VM 已升级 0.1.1-52，服务运行正常。
+
+### 2026-10-23 追加：use-hosts 与静态解析表（0.1.1-53）
+
+- 用户指出 `dns.use-hosts` 未暴露。补齐：设置键 `dnsUseHosts`（默认关，mihomo 官方默认一致）与 `dnsHosts`（域名 → IP 列表 map，≤64 项、每域 1–8 个纯 IP，ipaddress 严格校验）。UI：DNS 基础卡新增「使用静态解析表」开关（与「使用系统 Hosts」并列，帮助文案区分两者）；DNS 服务器卡新增折叠组「静态解析 Hosts」（域名 → IP，支持通配与 geosite: 匹配；dnsPolicyEditor 参数化出 itemLabel/itemPlaceholder/itemHint 复用）。
+- 注入：`dns.use-hosts` 走 seed_dns 常规字段；`hosts` 是 mihomo 顶层键，overlay 在 dns 处理后 `root.setdefault('hosts', …)`（非空才写，覆写显式接管优先，非 dict 覆写直接报「hosts 覆写必须是对象」）。
+- Python 249 项通过（默认无 hosts 键、tuned 写入与覆写优先、4 组非法值：非 dict/域名含空白/值非列表/值非 IP 含整数 223）；真实内核 v1.19.32 `-t` 通过（含 *.corp 双栈值与 geosite:internal）。VM：save dnsUseHosts+dnsHosts 后 apply，`/tmp/fii/config.yaml` 顶层 hosts 表与 dns.use-hosts: true 均生效，服务 running。
+
+### 2026-10-23 追加：安装后 luci.fii 未注册修复（0.1.1-54）
+
+- 用户真机（192.168.100.1）装 0.1.1-53 后 LuCI 报 `luci.fii/status Object not found`；VM 同包全新安装正常——差别在 rpcd 重载行为。此前仅 luci-app-fii postinst 有 `/etc/init.d/rpcd reload`，部分固件的 reload 不会重新加载 ucode 插件/ACL（rpcd 仅启动时读取），导致装完后 `luci.fii` 未注册。
+- 修复：两个包的 postinst 统一为「保会话优先的探测回退」——`/etc/init.d/rpcd reload` 后用 `ubus -S list luci.fii` 探测，仍缺才 `/etc/init.d/rpcd restart`（无条件 restart 会杀所有 LuCI 会话，verify_packages.py 原有断言禁止；断言更新为「restart 只能出现在带 ubus 探测的回退里」）。fii 源码包 Makefile postinst 与 build_ipk.py 生成的两份 postinst 同步。
+- VM 验证：卸载后全新安装 0.1.1-54（全程不手动碰 rpcd）→ luci.fii 立即注册、status 正常、服务自动恢复。装 53 的存量机器执行 `/etc/init.d/rpcd restart` 即可恢复；若 restart 后仍缺对象，属该固件 ucode 加载 rpc.uc 失败，需 logread + `ucode -e 'print(loadfile(...))'` 定位。
+
+### 2026-10-23 追加：跟随运营商 DNS 的覆写优先修复（0.1.1-55）
+
+- 用户真机场景：覆写 `dns!` 整块替换、nameserver 两条恰好与 DNS 页「默认 DNS」相同，开启跟随后最终输出 6 条（运营商 4 + 覆写 2）。根因：注入原在 overlay（覆写后）执行，用「nameserver == 设置列表」判定是否被覆写接管——覆写值恰好等于设置列表时无法区分，误注入。
+- 语义修复：**跟随运营商 DNS 归入默认值层，移到 `render()` 的覆写执行之前合并**（seed 后、overrides 循环前）——覆写显式配置 nameserver（含 `dns!` 整块替换、`+` 追加）自然获胜；无覆写时照常合并；「未检测到上游」warning 改挂 render 的 warnings。overlay 中的注入块删除（hosts 注入保留）。
+- 附带修复：postinst 的 rpcd 探测在 reload 后立即执行，而对象注册有秒级延迟——几乎必然误判走 restart（丢 LuCI 会话）。reload 与探测之间加 `sleep 2`（两包 postinst + Makefile 同步；verify_packages 断言不变）。
+- Python 249 项通过（跟随用例重写为 render 路径：默认关/兜底/优先/去重/覆写显式获胜/dns! 整块替换获胜/空上游告警）。VM 实测 `dns!` + 跟随：最终 nameserver 恰为覆写 3 条、10.0.2.3 不混入；用户真机升级 55 + 重新 apply：nameserver 恰为覆写 2 条（1.1.1.1/8.8.8.8#节点选择），运营商 4 条不再叠加，服务 transparent 正常。
+- 运维注意：经代理链路 SSH 操作用户路由器时，`fii apply`/包升级会重启服务并造成链路瞬断——远程命令需 nohup 脱离会话执行、断后重连验证；paramiko exec_command 传 JSON 参数须用远端单引号包裹（双引号转义会被 shell 剥掉）。

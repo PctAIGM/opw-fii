@@ -6,7 +6,7 @@ import json
 LEGACY_KEYS = {'dnsMode', 'fakeIpFilter', 'nameservers', 'defaultNameservers',
                'proxyNameservers', 'localDns', 'tunStack', 'tunMtu'}
 DEFAULTS = {
-    'dns': {'enable': True, 'ipv6': False, 'enhanced-mode': 'fake-ip',
+    'dns': {'enable': True, 'ipv6': False, 'enhanced-mode': 'redir-host',
             'fake-ip-range': '198.18.0.1/16', 'fake-ip-range6': 'fc00::/18',
             'nameserver': ['https://dns.alidns.com/dns-query', 'https://doh.pub/dns-query'],
             'default-nameserver': ['223.5.5.5', '119.29.29.29'],
@@ -30,6 +30,50 @@ def seed(root, final=False):
     if final:
         root['dns'].setdefault('proxy-server-nameserver', copy.deepcopy(root['dns']['nameserver']))
     return root
+
+
+def seed_dns(dns, settings):
+    """Seed DNS defaults from router settings, field by field.
+
+    The rendered/overridden document already carries the built-in DEFAULTS,
+    so a field is only replaced while it still equals its built-in default —
+    an explicit override value always wins. Empty optional lists mean "let
+    the core decide" and are not written.
+    """
+    from .model import check
+    check(isinstance(dns, dict), 'dns 覆写必须是对象')
+    values = {
+        'enable': settings.get('dnsEnable', True),
+        'ipv6': settings.get('dnsIpv6', False),
+        'enhanced-mode': settings.get('dnsEnhancedMode', DEFAULTS['dns']['enhanced-mode']),
+        'cache-algorithm': settings.get('dnsCacheAlgorithm', 'lru'),
+        'respect-rules': settings.get('dnsRespectRules', False),
+        'prefer-h3': settings.get('dnsPreferH3', False),
+        'use-system-hosts': settings.get('dnsUseSystemHosts', True),
+        'use-hosts': settings.get('dnsUseHosts', False),
+        'fake-ip-range': settings.get('dnsFakeIpRange', DEFAULTS['dns']['fake-ip-range']),
+        'fake-ip-range6': settings.get('dnsFakeIpRange6', DEFAULTS['dns']['fake-ip-range6']),
+        'fake-ip-filter': list(settings.get('dnsFakeIpFilter') or []),
+        'fake-ip-filter-mode': settings.get('dnsFakeIpFilterMode', 'blacklist'),
+        'nameserver': list(settings.get('dnsNameservers') or []),
+        'default-nameserver': list(settings.get('dnsDefaultNameservers') or []),
+        'nameserver-policy': copy.deepcopy(settings.get('dnsNameserverPolicy') or {}),
+    }
+    for key, value in values.items():
+        if key not in dns or dns[key] == DEFAULTS['dns'].get(key):
+            dns[key] = copy.deepcopy(value)
+    # The final seed copies nameserver into proxy-server-nameserver, so treat
+    # that copy as default-origin too: an override list only loses to settings
+    # when it is merely the nameserver mirror.
+    proxy = settings.get('dnsProxyServerNameservers') or []
+    if proxy and (dns.get('proxy-server-nameserver') in (None, dns.get('nameserver'))):
+        dns['proxy-server-nameserver'] = copy.deepcopy(proxy)
+    for key, name in (('direct-nameserver', 'dnsDirectNameservers'), ('fallback', 'dnsFallback'),
+                      ('proxy-server-nameserver-policy', 'dnsProxyServerNameserverPolicy')):
+        extra = settings.get(name) or []
+        if extra:
+            dns.setdefault(key, copy.deepcopy(extra))
+    return dns
 
 
 def migrate(data):

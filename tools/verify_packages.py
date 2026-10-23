@@ -33,7 +33,10 @@ def verify():
                     if member.name != "./control":
                         assert member.mode == 0o755
                         script = archive.extractfile(member).read()
-                        assert b'/etc/init.d/rpcd restart' not in script, 'Package hooks must preserve LuCI sessions'
+                        # A bare restart would drop every LuCI session; only a probed
+                        # fallback (reload, then restart if the object is missing) is allowed.
+                        if b'/etc/init.d/rpcd restart' in script:
+                            assert b'ubus -S list luci.fii' in script, 'Package hooks must preserve LuCI sessions'
                         if member.name == './postrm' or (record['file'].startswith('luci-app-fii_') and member.name == './postinst'):
                             assert b'/etc/init.d/rpcd reload' in script
             size = len(gzip.decompress(outer.extractfile("./data.tar.gz").read()))

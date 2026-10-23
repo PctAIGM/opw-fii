@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fii
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=47
+PKG_RELEASE:=55
 PKG_LICENSE:=GPL-3.0-or-later
 PKGARCH:=all
 
@@ -37,6 +37,9 @@ if [ -z "$${IPKG_INSTROOT}" ]; then
 		rm -f /tmp/fii-was-running
 		/etc/init.d/fii start || true
 	fi
+	/etc/init.d/rpcd reload
+	sleep 2
+	ubus -S list luci.fii >/dev/null 2>&1 || /etc/init.d/rpcd restart || true
 fi
 exit 0
 endef

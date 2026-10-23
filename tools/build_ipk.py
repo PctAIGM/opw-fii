@@ -9,7 +9,7 @@ from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.1-47"
+VERSION = "0.1.1-55"
 EPOCH = 1792339200  # 2026-10-19 00:00 UTC, deterministic archive timestamps.
 
 
@@ -97,6 +97,11 @@ if [ -f /tmp/fii-was-running ]; then
     rm -f /tmp/fii-was-running
     /etc/init.d/fii start || true
 fi
+# reload keeps LuCI sessions; some firmwares only pick up ucode plugins on restart.
+/etc/init.d/rpcd reload
+# Give rpcd a moment to register the object before deciding on a restart.
+sleep 2
+ubus -S list luci.fii >/dev/null 2>&1 || /etc/init.d/rpcd restart || true
 exit 0
 '''
     prerm = b'''#!/bin/sh
@@ -124,6 +129,9 @@ exit 0
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
 rm -rf /tmp/luci-modulecache
 /etc/init.d/rpcd reload
+# Give rpcd a moment to register the object before deciding on a restart.
+sleep 2
+ubus -S list luci.fii >/dev/null 2>&1 || /etc/init.d/rpcd restart || true
 exit 0
 '''
     manifest.append(build("luci-app-fii", luci_entries, "fii, luci-base, cgi-io", controls=[("postinst", luci_postinst, 0o755)]))

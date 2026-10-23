@@ -18,6 +18,9 @@ const devicePattern = /^[A-Za-z0-9_.:-]{1,15}$/;
 const digitsPattern = /^[0-9]+$/;
 const spacePattern = /\s+/;
 const cgroupPattern = /^[A-Za-z0-9_:@.-]{1,64}$/;
+// POSIX ERE: no non-capturing groups. Hint-level only; the Python merge
+// path validates with ipaddress.
+const upstreamDnsPattern = /^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9A-Fa-f:]{2,45}$/;
 const methods = ['get', 'status', 'save', 'refresh', 'preview', 'apply', 'service', 'export', 'import',
     'import_preview', 'logs', 'job', 'nodes', 'groups', 'select', 'resources', 'url_test', 'resource_update', 'core_info', 'core_check', 'core_update',
     'core_channel', 'network', 'transfer_begin', 'transfer_append', 'transfer_invoke', 'transfer_read',
@@ -510,6 +513,14 @@ function choices(networks, links) {
         if (length(parts) > 2 && match(parts[2], digitsPattern)) push(groups, { id: parts[2], name: parts[0] });
     }
     let cgroupV2 = !!fs.stat(path('/sys/fs/cgroup/cgroup.controllers'));
+    let wanDns = [], seenDns = {};
+    for (let line in lines('/tmp/resolv.conf.d/resolv.conf.auto', 64)) {
+        let parts = split(trim(line), spacePattern);
+        if (length(parts) != 2 || parts[0] != 'nameserver' || length(wanDns) >= 4) continue;
+        // Hint-level filter; the Python merge path validates with ipaddress.
+        if (!match(parts[1], upstreamDnsPattern) || substr(parts[1], 0, 4) == '127.' || parts[1] == '::1') continue;
+        if (!seenDns[parts[1]]) { seenDns[parts[1]] = 1; push(wanDns, parts[1]); }
+    }
     if (cgroupV2) {
         let pending = [{ name: '/sys/fs/cgroup', depth: 0 }];
         while (length(pending) && length(cgroups) < 512) {
@@ -526,7 +537,7 @@ function choices(networks, links) {
     }
     let list = values(devices);
     sort(list, (a, b) => (!!length(b.networks) - !!length(a.networks)) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    return response({ devices: list, hosts, users, groups, cgroups, cgroupV2 });
+    return response({ devices: list, hosts, users, groups, cgroups, cgroupV2, wanDns });
 }
 function network(context) {
     return context.call('network.interface', 'dump', {}, function(code, networks) {

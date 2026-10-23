@@ -293,8 +293,20 @@ def render(data, output_id, progress=None):
             proxies.append(p)
     names = [p["name"] for p in proxies]
     root = expand(load_map(BASE), names or ["DIRECT"])
-    from .mihomo import seed
+    from .mihomo import DEFAULTS, seed
     seed(root)
+    # Follow-the-ISP DNS belongs to the defaults layer: it merges before
+    # overrides run, so an override that sets nameserver explicitly — or
+    # replaces the whole dns! block — keeps full control of the list.
+    if data["settings"].get("dnsUseWanDns"):
+        from .network import wan_dns
+        base = list(data["settings"].get("dnsNameservers") or DEFAULTS["dns"]["nameserver"])
+        upstream = [server for server in wan_dns() if server not in base]
+        if upstream:
+            root["dns"]["nameserver"] = (upstream + base if data["settings"].get("dnsWanDnsPrefer")
+                                         else base + upstream)
+        else:
+            warnings.append("已开启跟随运营商 DNS，但未在 WAN 上检测到 DNS 服务器")
     root["proxies"] = proxies
     overrides = {o["id"]: o for o in data["overrides"]}
     ordered_ids = list(dict.fromkeys([o["id"] for o in data["overrides"] if o.get("global")] + output["overrideIds"]))
