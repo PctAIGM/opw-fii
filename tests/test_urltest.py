@@ -79,6 +79,41 @@ class UrlTests(unittest.TestCase):
                 self.assertEqual(result['status'], code)
                 self.assertGreaterEqual(result['delay'], 1)
 
+    def test_probe_through_explicit_proxy_actually_uses_it(self):
+        # A refused proxy endpoint proves the proxy path is taken, unlike the
+        # direct probe which still succeeds against the local server.
+        self.assertTrue(urltest.probe(self.base + '/ok')['reachable'])
+        result = urltest.probe(self.base + '/ok', 'http://127.0.0.1:1')
+        self.assertFalse(result['reachable'])
+        self.assertIn('连接失败', result['error'])
+
+    def test_running_core_routes_probe_through_mixed_listener(self):
+        from fii import runtime
+        bundle = {'settings': {'mixedAddress': '127.0.0.1', 'mixedPort': 7890}}
+        v6 = {'settings': {'mixedAddress': 'fd00::1', 'mixedPort': 7890}}
+        with TestDirectory() as tmp, patch.dict(os.environ, {'FII_ROOT': tmp}):
+            Store().read()
+            with patch.object(runtime, 'active', return_value=bundle), \
+                 patch.object(runtime, 'ready', return_value=True), \
+                 patch('subprocess.run') as run:
+                run.return_value = subprocess.CompletedProcess([], 0, stdout='{"reachable": true, "delay": 1, "status": 204}')
+                cli.dispatch('url_test', {'id': 'baidu'})
+                sent = json.loads(run.call_args.kwargs['input'])
+                self.assertEqual(sent['proxy'], 'http://127.0.0.1:7890')
+                self.assertEqual(sent['url'], urltest.DEFAULT_SITES[0]['url'])
+            with patch.object(runtime, 'active', return_value=v6), \
+                 patch.object(runtime, 'ready', return_value=True), \
+                 patch('subprocess.run') as run:
+                run.return_value = subprocess.CompletedProcess([], 0, stdout='{"reachable": true, "delay": 1, "status": 204}')
+                cli.dispatch('url_test', {'id': 'baidu'})
+                self.assertEqual(json.loads(run.call_args.kwargs['input'])['proxy'],
+                                 'http://[fd00::1]:7890')
+            with patch.object(runtime, 'active', return_value=None), \
+                 patch('subprocess.run') as run:
+                run.return_value = subprocess.CompletedProcess([], 0, stdout='{"reachable": true, "delay": 1, "status": 204}')
+                cli.dispatch('url_test', {'id': 'baidu'})
+                self.assertIsNone(json.loads(run.call_args.kwargs['input'])['proxy'])
+
     def test_saved_id_only_child_process_no_state_changes_and_stale_url(self):
         with TestDirectory() as tmp, patch.dict(os.environ, {'FII_ROOT': tmp}):
             data = sample(); data['settings']['urlTestSites'] = [{'id':'local', 'name':'Local', 'url':self.base+'/ok'}]

@@ -658,3 +658,10 @@ The router acceptance result should be added only after actually performing thes
 - 附带修复：postinst 的 rpcd 探测在 reload 后立即执行，而对象注册有秒级延迟——几乎必然误判走 restart（丢 LuCI 会话）。reload 与探测之间加 `sleep 2`（两包 postinst + Makefile 同步；verify_packages 断言不变）。
 - Python 249 项通过（跟随用例重写为 render 路径：默认关/兜底/优先/去重/覆写显式获胜/dns! 整块替换获胜/空上游告警）。VM 实测 `dns!` + 跟随：最终 nameserver 恰为覆写 3 条、10.0.2.3 不混入；用户真机升级 55 + 重新 apply：nameserver 恰为覆写 2 条（1.1.1.1/8.8.8.8#节点选择），运营商 4 条不再叠加，服务 transparent 正常。
 - 运维注意：经代理链路 SSH 操作用户路由器时，`fii apply`/包升级会重启服务并造成链路瞬断——远程命令需 nohup 脱离会话执行、断后重连验证；paramiko exec_command 传 JSON 参数须用远端单引号包裹（双引号转义会被 shell 剥掉）。
+
+### 2026-10-23 追加：网址延迟测试改经 Mihomo 转发（0.1.1-56）
+
+- 用户真机现象：FII 页面点测试 chatgpt 超时，但内网设备 curl 通。根因：url_test 由路由器本机发起，本机解析走 dnsmasq→运营商（被污染，chatgpt.com→108.160.170.43 假 IP）；用户「dnsmasq 正常直连解析」路由规则（uid 453, dns=false）是必要的——其 dns 覆写的 nameserver-policy 有 +.in-addr.arpa/+.ip6.arpa→127.0.0.1:53，dnsmasq 对公网 PTR 会转发上游，一旦劫持会形成 mihomo⇄dnsmasq 互等死锁（+.lan 等本地权威后缀无此问题）。
+- 方案 B（用户选定）：urltest 探测改经 **Mihomo mixed 监听转发**（test_site 读 active bundle 的 mixedAddress:mixedPort，ready 时作为 HTTP 代理传给探测子进程；域名由内核在出口解析，分流按当前策略；内核停止/无 bundle 回退直连——原行为）。子进程输入从裸 URL 串改为 {url, proxy} 对象（兼容旧格式）；环境变量代理依旧忽略。
+- UI 说明文案同步（"由路由器发起并经 Mihomo 转发……内核停止时回退直连"）。Python 251 项通过（新增：显式代理路径确实被使用（拒连代理=失败）、running 时经 mixed（v4/v6 地址格式）、停止时 proxy=None）。
+- 用户真机 0.1.1-56 实测全部七个测试站：百度 104ms/200、Google 177ms/204、GitHub 212ms/200、Apple 156ms/200、**chatgpt 1.3s 可达 HTTP 403**（原超时；403=落地 IP 风控，如实显示）、claude 1.3s 403、Gemini 1.6s/200。VM（QEMU 重启后）部署 56 冒烟 google 204/baidu 200 正常。

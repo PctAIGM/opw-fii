@@ -29,7 +29,7 @@ def validate_sites(sites):
         check(all(32 < ord(c) < 127 for c in value), '测试网址请使用 URL 编码和 ASCII 域名')
 
 
-def probe(url):
+def probe(url, proxy=None):
     import socket
     import ssl
     import time
@@ -39,9 +39,12 @@ def probe(url):
         def redirect_request(self, *args, **kwargs):
             return None
 
-    # Ignore environment proxy variables; router routing and FII's router
-    # traffic policy decide the path. Stop at headers, never download the page.
-    opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
+    # An explicit proxy routes the probe through Mihomo's mixed listener, so
+    # the measurement follows the running policy and the core's own DNS
+    # instead of the router's local (possibly poisoned) resolver. Without
+    # one, router routing decides and environment proxies stay ignored.
+    proxies = {'http': proxy, 'https': proxy} if proxy else {}
+    opener = request.build_opener(request.ProxyHandler(proxies), NoRedirect())
     started = time.monotonic()
     try:
         try:
@@ -84,8 +87,20 @@ def test_site(ident, expected_url=None):
         raise ValueError('正在测试其他网址，请稍后重试')
     try:
         try:
+            # Route through Mihomo while it runs: the probe then follows the
+            # live routing policy and resolves names at the core, not through
+            # the router's dnsmasq (which the user may deliberately keep on a
+            # direct upstream to avoid DNS loops).
+            from .runtime import active, ready
+            proxy = None
+            bundle = active()
+            if bundle and ready(bundle):
+                address = bundle['settings']['mixedAddress']
+                address = '[%s]' % address if ':' in address else address
+                proxy = 'http://%s:%d' % (address, bundle['settings']['mixedPort'])
             output = subprocess.run([sys.executable, str(Path(__file__).resolve())],
-                                    input=json.dumps(site['url']), capture_output=True, text=True,
+                                    input=json.dumps({'url': site['url'], 'proxy': proxy}),
+                                    capture_output=True, text=True,
                                     timeout=DEADLINE, check=True)
             result = json.loads(output.stdout)
         except subprocess.TimeoutExpired:
@@ -100,4 +115,9 @@ def test_site(ident, expected_url=None):
 if __name__ == '__main__':
     import json
     import sys
-    print(json.dumps(probe(json.loads(sys.stdin.read(8192)))))
+    payload = json.loads(sys.stdin.read(8192))
+    if isinstance(payload, dict):
+        result = probe(payload['url'], payload.get('proxy'))
+    else:  # Bare URL: pre-proxy command line and older callers.
+        result = probe(payload)
+    print(json.dumps(result))

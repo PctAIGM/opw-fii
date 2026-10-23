@@ -724,7 +724,7 @@ return view.extend({
         var add = button('添加网站', function() { edit(); });
         var panel = E('section', { 'class': 'fii-card fii-url-panel', 'aria-label': '网址延迟测试' }, [
             E('div', { 'class': 'fii-card-heading' }, [E('h3', {}, '网址延迟测试'), actions([all, add])]),
-            E('p', { 'class': 'fii-muted' }, '由路由器发起 HTTP 请求，按当前路由与代理策略访问。耗时包含 DNS、连接和 TLS，收到首个响应头即结束，不跟随跳转；单次最多 8 秒。'), host
+            E('p', { 'class': 'fii-muted' }, '由路由器发起并经 Mihomo 转发，按当前分流策略访问（域名由内核解析，不受本机 dnsmasq 影响）；内核停止时回退直连。耗时包含 DNS、连接和 TLS，收到首个响应头即结束，不跟随跳转；单次最多 8 秒。'), host
         ]);
         function key(site) { return site.id + '\n' + site.url; }
         function render() {
